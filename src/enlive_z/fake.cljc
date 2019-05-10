@@ -118,7 +118,8 @@
        (into where))]))
 
 (defn datascript-rule
-  "Returns [binding-vector rule]."
+  "Returns [binding-vector rule].
+   env is a predicate returning true on upstream vars."
   ([rule-name q] (datascript-rule rule-name q {}))
   ([rule-name q env]
     (let [q (expand-query q)
@@ -131,6 +132,143 @@
                       (map renames) free-vars)
           vars (-> [] (into ground-vars) (into free-vars))]
       [(vec vars) (into [(list rule-name rule-vars)] where)])))
+
+;; computing keyvars
+(defn- dnf "Returns a disjunctive normal form of the clause" [clause]
+  (cond
+    (vector? clause) [[clause]]
+    ; expression-clause
+    (seq? clause)
+    (case (first clause)
+      and (if-some [[clause & clauses] (next clause)]
+            (for [a (dnf clause) b (dnf (cons 'and clauses))]
+              (concat a b))
+            [[]])
+      or (mapcat dnf (next clause))
+      not (->> (dnf (cons 'and (next clause)))
+            (reduce
+              (fn [not-dnf conjunction]
+                (for [clause conjunction
+                      conjunction' not-dnf]
+                  (conj conjunction' (list 'not clause))))
+              [[]])))
+    :else (throw (ex-info (str "Unexpected clause " (pr-str clause)) {:clause clause}))))
+
+(defn- scc
+  "Returns the strongly connected components of a graph specified by its nodes
+   and a successor function succs from node to nodes.
+   The used algorithm is Tarjan's one."
+  [nodes succs]
+  (letfn [(sc [env node]
+            ; env is a map from nodes to stack length or nil,
+            ; nil means the node is known to belong to another SCC
+            ; there are two special keys: ::stack for the current stack 
+            ; and ::sccs for the current set of SCCs
+            (if (contains? env node)
+              env
+              (let [stack (::stack env)
+                    n (count stack)
+                    env (assoc env node n ::stack (conj stack node))
+                    env (reduce (fn [env succ]
+                                  (let [env (sc env succ)]
+                                    (assoc env node (min (or (env succ) n) (env node)))))
+                          env (succs node))]
+                (if (= n (env node)) ; no link below us in the stack, call it a SCC
+                  (let [nodes (::stack env)
+                        scc (set (take (- (count nodes) n) nodes))
+                        ; clear all stack lengths for these nodes since this SCC is done
+                        env (reduce #(assoc %1 %2 nil) env scc)]
+                    (assoc env ::stack stack ::sccs (conj (::sccs env) scc)))
+                  env))))]
+    (::sccs (reduce sc {::stack () ::sccs #{}} nodes))))
+
+; for a conjunction (of a DNF) we emit a graph of deps
+(defn- deps [conjunction schema]
+  (transduce (mapcat
+              (fn self [clause]
+                (if (seq? clause) 
+                  (case (first clause)
+                    ; emit nothing on not: imagine (not [?a :ident/attr :k])
+                    not nil)
+                  ; else must be a vector
+                  (let [[e a v] (into clause '[_ _ _])]
+                    (when-not (or (= '_ e) (symbol? a) (= '_ v))
+                      (cond
+                        (symbol? e)
+                        (cond
+                          (symbol? v)
+                          (when (= :db.cardinality/one (get-in schema [a :db/cardinality] :db.cardinality/one))
+                            [[e v]])
+                
+                          (get-in schema [a :db/unique]) [[:known v]])
+              
+                        (seq? e)
+                        (case (first e)
+                          get-else (let [v a
+                                         [_ src e a default] e]
+                                     (recur [e a v])))
+                        :else :TODO))))))
+    (completing
+      (fn [succs [a b]]
+        (update succs a (fnil conj []) b)))
+    {} conjunction))
+
+(defn- keyset [conjunction schema env]
+  (let [succs (-> (deps conjunction schema)
+                (update :known (fnil into []) (keys env)))
+        sccs (scc (keys succs) succs)
+        scc-of (into {}
+                 (for [scc sccs, var scc]
+                   [var scc]))
+        succs (into {}
+                (map (fn [[a bs]]
+                       (let [scc-a (scc-of a)]
+                         [scc-a (into #{} (comp (remove scc-a) (map scc-of)) bs)])))
+                succs)
+        src-only (dissoc (reduce dissoc succs (mapcat val succs)) #{:known})]
+    (keys src-only)))
+
+(defn keyvars [expanded-q schema env]
+  ; in presence of many cycles the key may not be minimal
+  (into #{} (comp (mapcat #(keyset % schema env)) (map first)) (dnf (cons 'and expanded-q))))
+
+;; BROKEN CODE BELOW
+
+;; templates
+
+(defprotocol Template
+  (query [t]
+    "returns the query for this template")
+  (used-vars [t]
+    "vars used in its own body (not by nested templates)")
+  (children [t] "returns a map of ids (mount points) to templates"))
+
+{:query [[?id10472 :item/title title] [?id10472 :item/done done]]
+ :key [?id10472]
+ :vars #{}
+ :children
+ [{:query []
+   :key []
+   :vars #{}
+   :children
+   [{:query []
+   :key []
+   :own-vars #{title}
+   :children
+   []}
+    {:query []
+     :key []
+   :own-vars #{done}
+   :children
+   []}]}]}
+
+(defn foreign-template [vars f]
+  {:vars vars
+   :instance f})
+
+(defn with-template [q body]
+  {:query q
+   :children [body]})
 
 ;; hiccup-style template
 
