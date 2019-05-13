@@ -17,21 +17,42 @@
         (doseq [[eid q f] (d/q '[:find ?eid ?q ?f :where [?eid ::live-query ?q] [?eid ::handler ?f]] db-after)]
           (f (d/q q db-after)))))))
 
+#_(defn subscription
+   "Returns transaction.
+   Upon subscription f receives a (positive only) delta representing the current state."
+   [q f]
+   [{::live-query q
+     ::handler
+     (let [prev-rows (atom #{})]
+       (fn [rows]
+         (let [prev-rows @prev-rows
+               added (reduce disj rows prev-rows)
+               retracted (reduce disj prev-rows rows)
+               delta (-> #{}
+                (into (map #(conj % true)) added)
+                (into (map #(conj % false)) retracted))]
+           (when (not= #{} delta)
+             (f delta)))
+         (reset! prev-rows rows)))}])
+
 (defn subscription
   "Returns transaction.
-   Upon successful transaction, the "
-  "Subscription is immediate: upon subscription f receives a (positive only) delta representing the current state."
-  [q f]
+   Upon subscription f receives a (positive only) delta representing the current state."
+  [q keys-count f]
   [{::live-query q
     ::handler
-    (let [prev-rows (atom #{})]
+    (let [prev-rows (atom {})]
       (fn [rows]
         (let [prev-rows @prev-rows
-              added (reduce disj rows prev-rows)
-              retracted (reduce disj prev-rows rows)
+              rows (into {} (map (fn [row] [(subvec row 0 keys-count) row])) rows)
+              upserts 
+              (into {}
+                (remove (fn [[k row]] (= row (prev-rows k))))
+                rows)
+              retracts (reduce dissoc prev-rows (keys rows))
               delta (-> #{}
-               (into (map #(conj % true)) added)
-               (into (map #(conj % false)) retracted))]
+               (into (map #(conj % true)) upserts)
+               (into (map #(conj % false)) retracts))]
           (when (not= #{} delta)
             (f delta)))
         (reset! prev-rows rows)))}])
@@ -213,9 +234,9 @@
         (update succs a (fnil conj []) b)))
     {} conjunction))
 
-(defn- keyset [conjunction schema env]
+(defn- keyset [conjunction schema known-vars]
   (let [succs (-> (deps conjunction schema)
-                (update :known (fnil into []) (keys env)))
+                (update :known (fnil into []) known-vars))
         sccs (scc (keys succs) succs)
         scc-of (into {}
                  (for [scc sccs, var scc]
@@ -228,47 +249,33 @@
         src-only (dissoc (reduce dissoc succs (mapcat val succs)) #{:known})]
     (keys src-only)))
 
-(defn keyvars [expanded-q schema env]
+(defn keyvars [expanded-q schema known-vars]
   ; in presence of many cycles the key may not be minimal
-  (into #{} (comp (mapcat #(keyset % schema env)) (map first)) (dnf (cons 'and expanded-q))))
+  (into #{} (comp (mapcat #(keyset % schema known-vars)) (map first)) (dnf (cons 'and expanded-q))))
 
 ;; BROKEN CODE BELOW
 
 ;; templates
+;; ok se have to collect queries
+;; each query should output a key segmented as a path
 
-(defprotocol Template
-  (query [t]
-    "returns the query for this template")
-  (used-vars [t]
-    "vars used in its own body (not by nested templates)")
-  (children [t] "returns a map of ids (mount points) to templates"))
-
-{:query [[?id10472 :item/title title] [?id10472 :item/done done]]
- :key [?id10472]
- :vars #{}
- :children
- [{:query []
-   :key []
-   :vars #{}
-   :children
-   [{:query []
-   :key []
-   :own-vars #{title}
-   :children
-   []}
-    {:query []
-     :key []
-   :own-vars #{done}
-   :children
-   []}]}]}
-
-(defn foreign-template [vars f]
-  {:vars vars
-   :instance f})
-
-(defn with-template [q body]
-  {:query q
-   :children [body]})
+(defn collect-queries
+  "Returns a sequence of [key-path expanded-qs] where expanded-qs os a sequence of expanded queries"
+  [template known-vars schema]
+  {:post [(do (prn 'RET template %) true)]}
+  (let [q (expand-query (:query template []))
+        vars (implicit-vars q)
+        own-keys (keyvars q schema known-vars)
+        child-var (gensym '?child)
+        known-vars (into known-vars vars)]
+    (cons
+      [[own-keys] [q]]
+      (for [[i subqs]
+            (map-indexed
+              (fn [i t] [i (collect-queries t known-vars schema)])
+              (:children template))
+            [kps qs] subqs]
+        [(cons own-keys kps) (list* q [(list 'ground i) child-var] qs)]))))
 
 ;; hiccup-style template
 
@@ -282,23 +289,56 @@
 (defn lift-templates
   "Replace inline templates by mount points."
   [body]
-  (let [children (atom {})
+  (let [children (atom [])
         body (into []
                (map #(walk-template %
                        (fn [expr]
-                         (let [mount-id (keyword (gensym 'mount))]
-                           (swap! children assoc mount-id expr)
+                         (let [mount-id (dec (count (swap! children conj expr)))]
                            `(mount ~mount-id)))))
-               
                body)]
-    {:children @children
+    {:children (mapv
+                 (fn [expr]
+                   (if (when-some [x (when (seq? expr) (first expr))]
+                         (and (symbol? x)
+                           (some-> x resolve meta ::template)))
+                     expr
+                     `(foreign ~expr)))
+                 @children)
      :body body}))
 
 (defn used-vars
   "vars must be a predicate"
   [expr vars]
-  ; TODO amke it right: it's an overestimate
+  ; TODO make it right: it's an overestimate
   (set (filter vars (flatten expr))))
+
+(defmacro ^::template with
+  "iteration"
+  [q & body]
+  ; TODO: add options (:sort)
+  `{:query '~q
+    :children [~(lift-templates body)]})
+
+(defmacro ^::template foreign [expr]
+  "leaf template"
+  (let [vars (vec (used-vars expr &env))] 
+    `{:vars ~vars
+      :ffn (fn ~vars ~expr)}))
+
+
+;; component state is 
+{:children {}
+ :make-instance }
+
+(defn upsert [component ks row]
+  (let [[[i k] & ks] (seq ks)]
+    (if (component ))
+    ))
+
+
+
+
+
 
 (defn hollow* [children-templates body]
   (let [state (atom (initial-render))]
