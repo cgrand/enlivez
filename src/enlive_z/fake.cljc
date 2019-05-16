@@ -4,7 +4,8 @@
     [clojure.tools.analyzer.jvm :as ana.jvm]
     [clojure.spec.alpha :as s]
     [datascript.core :as d]
-    [clojure.walk :as walk]))
+    [clojure.walk :as walk]
+    [clojure.string :as str]))
 
 ;; Datasource is only accessible through subscription
 
@@ -16,46 +17,6 @@
       (fn [{:keys [tx-data db-after]}]
         (doseq [[eid q f] (d/q '[:find ?eid ?q ?f :where [?eid ::live-query ?q] [?eid ::handler ?f]] db-after)]
           (f (d/q q db-after)))))))
-
-#_(defn subscription
-   "Returns transaction.
-   Upon subscription f receives a (positive only) delta representing the current state."
-   [q f]
-   [{::live-query q
-     ::handler
-     (let [prev-rows (atom #{})]
-       (fn [rows]
-         (let [prev-rows @prev-rows
-               added (reduce disj rows prev-rows)
-               retracted (reduce disj prev-rows rows)
-               delta (-> #{}
-                (into (map #(conj % true)) added)
-                (into (map #(conj % false)) retracted))]
-           (when (not= #{} delta)
-             (f delta)))
-         (reset! prev-rows rows)))}])
-
-(defn subscription
-  "Returns transaction.
-   Upon subscription f receives a (positive only) delta representing the current state."
-  [q keys-count f]
-  [{::live-query q
-    ::handler
-    (let [prev-rows (atom {})]
-      (fn [rows]
-        (let [prev-rows @prev-rows
-              rows (into {} (map (fn [row] [(subvec row 0 keys-count) row])) rows)
-              upserts 
-              (into {}
-                (remove (fn [[k row]] (= row (prev-rows k))))
-                rows)
-              retracts (reduce dissoc prev-rows (keys rows))
-              delta (-> #{}
-               (into (map #(conj % true)) upserts)
-               (into (map #(conj % false)) retracts))]
-          (when (not= #{} delta)
-            (f delta)))
-        (reset! prev-rows rows)))}])
 
 ;; query maps
 
@@ -259,23 +220,156 @@
 ;; ok se have to collect queries
 ;; each query should output a key segmented as a path
 
-(defn collect-queries
-  "Returns a sequence of [key-path expanded-qs] where expanded-qs os a sequence of expanded queries"
-  [template known-vars schema]
-  {:post [(do (prn 'RET template %) true)]}
-  (let [q (expand-query (:query template []))
-        vars (implicit-vars q)
-        own-keys (keyvars q schema known-vars)
-        child-var (gensym '?child)
-        known-vars (into known-vars vars)]
-    (cons
-      [[own-keys] [q]]
+(defprotocol Template
+  (collect-queries [t known-vars schema]
+    "Returns a sequence of sequences of [keyvars other-vars expanded-q] where expanded-qs os a sequence of expanded queries
+     and key-path is a sequence of [keyvars other-vars]. Both sequences MUST have the same size.")
+  (emit [t]))
+
+(defrecord With [q child]
+  Template
+  (collect-queries [t known-vars schema]
+    (let [q (expand-query q)
+          vars (implicit-vars q)
+          own-keys (keyvars q schema known-vars)
+          known-vars (into known-vars vars)
+          segment [own-keys q]]
+      (for [q (cons nil (collect-queries child known-vars schema))]
+        (cons segment q))))
+  (emit [t]
+    `(with-component ~(emit child))))
+
+(defn used-vars
+  "vars must be a predicate"
+  [expr known-vars]
+  ; TODO make it right: it's an overestimate
+  (set (filter known-vars (flatten expr))))
+
+(defrecord Terminal [expr]
+  Template
+  (collect-queries [t known-vars schema]
+    [[[(vec (used-vars expr known-vars)) []]]])
+  (emit [t]
+    `(terminal-component
+       (fn [~@(used-vars expr known-vars)] ~expr))))
+
+(defrecord Fragment [body children]
+  Template
+  (collect-queries [t known-vars schema]
+    (let [child-var (gensym '?child)
+          child-key [child-var]]
       (for [[i subqs]
             (map-indexed
               (fn [i t] [i (collect-queries t known-vars schema)])
-              (:children template))
-            [kps qs] subqs]
-        [(cons own-keys kps) (list* q [(list 'ground i) child-var] qs)]))))
+              children)
+            q subqs]
+        (cons [child-key [[(list 'ground i) child-var]]] q))))
+  (emit [t]
+    `(fragment-component )))
+
+(defn flatten-q
+  "Flattens a hierarchical query to a pair [actual-query f] where f
+   is a function to map a row to a path."
+  [hq]
+  (let [where (mapcat second hq)
+        find (mapcat first hq)
+        seg-fns (mapv (fn [[from to]]
+                        #(subvec % from to))
+                  (partition 2 1 
+                    (reductions + 0 (map (fn [k] (count k)) hq))))]
+    [`[:find ~@find :where ~@where]
+     (fn [row] (into [] (map #(% row)) seg-fns))]))
+
+(defn subscription
+  "Returns transaction.
+   Upon subscription f receives a (positive only) delta representing the current state."
+  [hq f]
+  (let [[q path-fn] (flatten-q hq)]
+    [{::live-query q
+      ::handler
+      (let [prev-paths (atom {})]
+        (fn [rows]
+          (let [prev-paths @prev-paths
+                ; I could also use a flat sorted map with the right order
+                paths (into {} (comp (map path-fn) (map (fn [path] [(take-nth 2 path) path]))) rows)
+                deletions (reduce dissoc prev-paths (keys paths))
+                upserts  (into {}
+                           (remove (fn [[ks path]] (= path (prev-paths ks))))
+                           paths)
+                delta (-> #{}
+                        (into (map #(cons false %)) deletions)
+                        (into (map #(cons true %)) (vals upserts)))]
+            (when (not= #{} delta)
+              (f delta)))
+          (reset! prev-rows rows)))}]))
+
+(defprotocol Component
+  (ensure! [c k] "Returns the child component")
+  (delete! [c k] "Deletes the child component"))
+
+(defn fragment-component [dom children]
+  (fn [ump!]
+    (let [adom (atom dom)
+          children
+          (into []
+            (map (fn [[path child]]
+                   (child #(ump! (swap! adom assoc-in path %)))))
+            children)]
+      (ump! dom)
+      (reify Component
+        (ensure! [c [i]] (nth children i))))))
+
+(defn terminal-component [f]
+  (fn [ump!]
+    (reify Component
+      (ensure! [c k] (ump! (apply f k)) nil))))
+
+(defn with-component [child]
+  (fn [ump!]
+    (let [children (atom {})
+          ordered-ks (atom [])
+          doms (atom {})]
+      (reify Component
+        (ensure! [c k]
+          (or (@children k)
+            (let [child (child
+                          #(let [doms (swap! doms assoc k %)]
+                             (ump! (map doms @ordered-ks))))]
+              (swap! ordered-ks conj k)
+              (swap! children assoc k child)
+              child)))))))
+
+(defn ensure-path! [component path]
+  (reduce ensure! component path))
+
+#_(let [adom (atom nil)
+       root (fragment-component [:ul :_]
+              [[[1] (with-component 
+                      (fragment-component [:li :_ "is" :_]
+                        [[[1] (terminal-component identity)]
+                         [[3] (terminal-component #(if % "done" "yet to do"))]]))]])
+       root (root #(reset! adom %))]
+   (doto root
+     (ensure-path! [[0] [12345]])
+     (ensure-path! [[0] [12345] [0] ["title"]])
+     (ensure-path! [[0] [12345] [1] [false]]))
+   @adom)
+
+(defn fragment-component [up! frag children]
+  (reify Component
+    (ensure! [c k ump!]
+      
+      (ensure! (children k)  )
+      (up! (f k)))))
+
+(defrecord FragmentComponent [children]
+  (ensure! [c k] (children k)))
+
+(defrecord TerminalComponent [f]
+  (ensure! [c k] (f k) c))
+
+(defrecord WithComponent [children f]
+  (ensure! [c k] (or (get children k) )))
 
 ;; hiccup-style template
 
@@ -302,15 +396,26 @@
                          (and (symbol? x)
                            (some-> x resolve meta ::template)))
                      expr
-                     `(foreign ~expr)))
+                     `(terminal ~expr)))
                  @children)
      :body body}))
 
-(defn used-vars
-  "vars must be a predicate"
-  [expr vars]
-  ; TODO make it right: it's an overestimate
-  (set (filter vars (flatten expr))))
+
+
+
+
+
+
+(fn [title done]
+  (let [nodes ...
+        title-terminal (xxx title)
+        done-terminal (xxx title)]
+    ))
+
+
+
+
+
 
 (defmacro ^::template with
   "iteration"
@@ -319,39 +424,78 @@
   `{:query '~q
     :children [~(lift-templates body)]})
 
-(defmacro ^::template foreign [expr]
+(defmacro ^::template terminal [expr]
   "leaf template"
   (let [vars (vec (used-vars expr &env))] 
     `{:vars ~vars
       :ffn (fn ~vars ~expr)}))
 
 
+(defn- ^String camelize [k]
+  (str/replace (name k) #"-(\w)" (fn [[_ l]] (.toUpperCase ^String l))))
+
+(defn render-attrs [^StringBuilder sb attrs]
+  (doseq [[k v] attrs
+          :let [k (camelize k)]
+          :when (and v (not (seq? v)))]
+    (-> sb (.append " ") (.append k))
+    (when-not (true? v)
+      (-> sb (.append "=\"") (.append (str/replace (str v) "\"" "&quot;")) (.append "\""))))
+  sb)
+
+(defn render-dyn-attrs [^StringBuilder sb attrs]
+  (doseq [v (vals attrs)
+          :when (seq? v)]
+    (-> sb (.append "<!-- ") (.append (str (second v))) (.append " -->")))
+  sb)
+
+(defn render-node [^StringBuilder sb x]
+  (cond
+    (vector? x)
+    (let [tag (first x)
+          attrs (second x)
+          attrs (when (map? attrs) attrs)
+          content (if attrs (nnext x) (next x))
+          sb (-> sb (.append "<") (.append (name tag)) (render-attrs attrs) (.append ">"))]
+      (case tag
+        (:area :base :br :col :embed :hr :img :input :link :meta :param :source :track :wbr)
+        nil
+        (do
+          (reduce render-node sb content)
+          (-> sb (.append "</") (.append (name tag)) (.append ">"))))
+      (render-dyn-attrs sb attrs))
+    (string? x)
+    (.append sb (str/replace x #"[&<]"
+                  #(if (= \& (.charAt ^String % 0)) "&amp;" "&lt;")))
+    ; mount
+    :else (-> sb (.append "<!-- ") (.append (str (second x))) (.append " -->"))))
+
+(defn render-fragments [xs]
+  (str (reduce render-node (StringBuilder.) xs)))
+
+`(-> js/document .createRange (.createContextualFragment ~(render-fragments)))
+
 ;; component state is 
 {:children {}
  :make-instance }
 
-(defn upsert [component ks row]
+(defn upsert [component path]
   (let [[[i k] & ks] (seq ks)]
     (if (component ))
     ))
 
+{:f 
+ (fn
+   ([] {:h [:li nil]
+        :x {[1] (fn [_ k [title _]] title)}})
+   [acc [k o & path]]
+   (let [[title done] o]
+     [:li title ]))}
 
 
 
 
 
-(defn hollow* [children-templates body]
-  (let [state (atom (initial-render))]
-    (fn [drow])))
-
-(defn with* [row-template]
-  (let [children (atom {})]
-    (fn [drow]
-      (let [added (peek drow)
-            row (pop drow)]
-        (if added
-          (swap! children assoc row (row-template row))
-          (swap! children dissoc row))))))
 
 (s/def ::deftemplate-args
   (s/cat :name symbol?
