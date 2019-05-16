@@ -224,7 +224,7 @@
   (collect-queries [t known-vars schema]
     "Returns a sequence of sequences of [keyvars other-vars expanded-q] where expanded-qs os a sequence of expanded queries
      and key-path is a sequence of [keyvars other-vars]. Both sequences MUST have the same size.")
-  (emit [t]))
+  (emit [t known-vars]))
 
 (defrecord With [q child]
   Template
@@ -236,20 +236,20 @@
           segment [own-keys q]]
       (for [q (cons nil (collect-queries child known-vars schema))]
         (cons segment q))))
-  (emit [t]
-    `(with-component ~(emit child))))
+  (emit [t known-vars]
+    `(with-component ~(emit child (into known-vars (implicit-vars (expand-query q)))))))
 
 (defn used-vars
   "vars must be a predicate"
   [expr known-vars]
   ; TODO make it right: it's an overestimate
-  (set (filter known-vars (flatten expr))))
+  (set (filter known-vars (cons expr (flatten expr)))))
 
 (defrecord Terminal [expr]
   Template
   (collect-queries [t known-vars schema]
     [[[(vec (used-vars expr known-vars)) []]]])
-  (emit [t]
+  (emit [t known-vars]
     `(terminal-component
        (fn [~@(used-vars expr known-vars)] ~expr))))
 
@@ -264,8 +264,15 @@
               children)
             q subqs]
         (cons [child-key [[(list 'ground i) child-var]]] q))))
-  (emit [t]
-    `(fragment-component )))
+  (emit [t known-vars]
+    (let [{:keys [body paths]} body]
+      `(fragment-component
+         ~body 
+         ~(vec 
+            (map
+              (fn [path child]
+                [`'~path (emit child known-vars)])
+              paths children))))))
 
 (defn flatten-q
   "Flattens a hierarchical query to a pair [actual-query f] where f
@@ -372,63 +379,69 @@
   (ensure! [c k] (or (get children k) )))
 
 ;; hiccup-style template
-
-(defn walk-template [form f]
+(defn lift-expressions
+  "Returns [expressions hollowed-x] where
+   expressions is a sequence of [path expression] and hollowed-x is x where symbols and
+   sequences have been replaced by nil."
+  [x]
   (cond
-    (vector? form) (into [] (map #(walk-template % f)) form)
-    (map? form) (into {} (map (fn [[k v]] [k (walk-template v f)])) form)
-    (or (symbol? form) (seq? form)) (f form)
-    :else form))
+    (indexed? x)
+    (reduce-kv (fn [[exprs x] k v]
+                 (let [[subexprs v] (lift-templates v)]
+                   [(into exprs
+                      (for [[path subexpr] subexprs]
+                        [(cons k path) subexpr]))
+                    (assoc x k v)]))
+      [{} x] x)
+    (or (symbol? x) (seq? x)) [{nil x} nil]
+    :else [{} x]))
 
-(defn lift-templates
-  "Replace inline templates by mount points."
-  [body]
-  (let [children (atom [])
-        body (into []
-               (map #(walk-template %
-                       (fn [expr]
-                         (let [mount-id (dec (count (swap! children conj expr)))]
-                           `(mount ~mount-id)))))
-               body)]
-    {:children (mapv
-                 (fn [expr]
-                   (if (when-some [x (when (seq? expr) (first expr))]
-                         (and (symbol? x)
-                           (some-> x resolve meta ::template)))
-                     expr
-                     `(terminal ~expr)))
-                 @children)
-     :body body}))
+; how to expand
+(with {[title done] :item/attrs}
+  [:li title " is " (if done "done" "yet to do") "."])
 
+; to
+([#{?id12978} [[?id12978 :item/title title] [?id12978 :item/done done]]])
+([#{?id12978} [[?id12978 :item/title title] [?id12978 :item/done done]]] [[?child12979] [[(ground 0) ?child12979]]] [[title] []])
+([#{?id12978} [[?id12978 :item/title title] [?id12978 :item/done done]]] [[?child12979] [[(ground 1) ?child12979]]] [[] []])
+(with-component 
+  (fragment-component [:li :_ " is " :_ "."]
+    [[[1] (terminal-component (fn [title] title))]
+     [[3] (terminal-component (fn [done] (if done "done" "yet to do")))]]))
 
 
+(defn ^::special fragment [& body]
+  (let [[exprs body] (lift-expressions (vec body))
+        children (for [expr (vals exprs)]
+                   (let [v  (when-some [x (and (seq? expr) (first expr))]
+                              (and (symbol? x) (some-> x resolve)))]
+                     (if (-> v meta ::special)
+                       (apply @v (next expr)) ; TODO inclusion
+                       (terminal expr))))
+        paths (keys exprs)]
+    (Fragment. {:body body :paths paths} (vec children))))
+
+(defn ^::special with [q & body]
+  (With. q (apply fragment body)))
+
+(defn ^::special terminal [expr]
+  (Terminal. expr))
+
+
+(defmacro deftemplate [name args & body]
+  (let [template (apply fragment body)]
+    `(def ~name
+       ~(emit template #{}))))
 
 
 
-
-(fn [title done]
-  (let [nodes ...
-        title-terminal (xxx title)
-        done-terminal (xxx title)]
-    ))
+(enlive-z.fake/with-component
+  (enlive-z.fake/fragment-component [[:li nil " is " nil "."]]
+    [[(0 1) (enlive-z.fake/terminal-component (clojure.core/fn [title] title))]
+     [(0 3) (enlive-z.fake/terminal-component (clojure.core/fn [done] (if done "done" "yet to do")))]]))
 
 
 
-
-
-
-(defmacro ^::template with
-  "iteration"
-  [q & body]
-  ; TODO: add options (:sort)
-  `{:query '~q
-    :children [~(lift-templates body)]})
-
-(defmacro ^::template terminal [expr]
-  "leaf template"
-  (let [vars (vec (used-vars expr &env))] 
-    `{:vars ~vars
-      :ffn (fn ~vars ~expr)}))
 
 
 (defn- ^String camelize [k]
@@ -475,24 +488,6 @@
 
 `(-> js/document .createRange (.createContextualFragment ~(render-fragments)))
 
-;; component state is 
-{:children {}
- :make-instance }
-
-(defn upsert [component path]
-  (let [[[i k] & ks] (seq ks)]
-    (if (component ))
-    ))
-
-{:f 
- (fn
-   ([] {:h [:li nil]
-        :x {[1] (fn [_ k [title _]] title)}})
-   [acc [k o & path]]
-   (let [[title done] o]
-     [:li title ]))}
-
-
 
 
 
@@ -515,40 +510,5 @@
 ;; and its mountpoint (as an identical component may occur elsewhere).
 
 ;; Thus an invocation of the template is an instantiation
-
-(defn add [{:as component :keys [n instantiate]} row]
-  (if (seq row)
-    (let [k (subvec row 0 n)]
-      (update-in component [:children k]
-        (fn [child]
-          (add (or child (instantiate k) (subvec row n))))))
-    component))
-
-(defn retract [{:as component :keys [n]} row]
-  (let [k (subvec row 0 n)
-        remk (subvec row n)]
-    (if (seq remk)
-      (update-in component [:children k]
-        (fn [child]
-          (add (or child (instantiate k) remk))))
-      (dissoc-in component [:children k]))))
-
-`(with q )
-
-
-(fn [k]
-  {::live-query q
-   ::handler })
-
-(fn
-  ([db k args]
-    (s/subscribe db k q
-      (fn [drows]
-        ))))
-
-(defmacro deftemplate [& body]
-  (let [{:keys [name doc params options body]} (s/conform ::deftemplate-args body)]
-    `(fn [ddb# ~args])
-    ))
 
 
