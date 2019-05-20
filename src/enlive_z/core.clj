@@ -49,7 +49,7 @@
 ;; keysets
 (defn implicit-vars [expanded-q] ; is this still needed? (except for _)
   (into #{}
-    (filter #(and (symbol? %) (not= '_ %) (not (.startsWith (name %) "?"))))
+    (filter #(and (symbol? %) (not= '_ %) #_(not (.startsWith (name %) "?"))))
     ; assumes there are no extra datasources, and that a var can't appear in function
     ; position
     (tree-seq coll? (fn [x] (cond-> (seq x) (seq? x) next)) expanded-q)))
@@ -152,6 +152,13 @@
   ; in presence of many cycles the key may not be minimal
   (into #{} (comp (mapcat #(keyset % schema known-vars)) (map first)) (dnf (cons 'and expanded-q))))
 
+(defn question-vars [x]
+  (cond
+    (seq? x) (cons (first x) (map question-vars (next x)))
+    (vector? x) (into [] (map question-vars) x)
+    (and (symbol? x) (not (.startsWith (name x) "?"))) (symbol (str "?" (name x)))
+    :else x))
+
 ;; hiccup-style template
 (defn lift-expressions
   "Returns [expressions hollowed-x] where
@@ -181,7 +188,7 @@
 (defn terminal [env expr]
   (fn [known-vars schema]
     (let [args (used-vars expr known-vars)]
-      `(terminal-template '[~@args] (fn [[~@args]] ~expr)))))
+      `(terminal-template '[~@(map question-vars args)] (fn [[~@args]] ~expr)))))
 
 (defn fragment [env & body]
   (let [[exprs body] (lift-expressions (vec body))
@@ -196,14 +203,15 @@
       `(fragment-template ~body
          [~@(for [[path child] children] [`'~path (child known-vars schema)])]))))
 
-(defn ^::special with [env q & body]
+(defn with [env q & body]
   (let [q (expand-query q)
         vars (implicit-vars q)
+        ?q (question-vars q)
         child (apply fragment env body)]
     (fn [known-vars schema]
-      (let [own-keys (keyvars q schema known-vars)
+      (let [own-keys (map question-vars (keyvars q schema known-vars))
             known-vars (into known-vars vars)]
-        `(with-template '~q '~own-keys '~known-vars
+        `(with-template '~?q '~own-keys '~known-vars
            ~(child known-vars schema))))))
 
 (defmacro deftemplate [name args & body]
