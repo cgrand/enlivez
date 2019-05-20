@@ -1,5 +1,7 @@
-(ns enlivez.core)
+(ns enlive-z.core
+  (:require [cljs.analyzer :as ana]))
 
+;; query maps syntax
 (defn- reverse-lookup
   "Returns the direct keyword when the input keyord is reversed, else returns nil."
   [k]
@@ -44,7 +46,8 @@
   (let [x (if (map? x) [x] x)]
     (into [] (mapcat (fn [x] (if (map? x) (:clauses (expand-query-map x)) [x])) x))))
 
-(defn implicit-vars [expanded-q]
+;; keysets
+(defn implicit-vars [expanded-q] ; is this still needed? (except for _)
   (into #{}
     (filter #(and (symbol? %) (not= '_ %) (not (.startsWith (name %) "?"))))
     ; assumes there are no extra datasources, and that a var can't appear in function
@@ -173,27 +176,30 @@
   ; TODO make it right: it's an overestimate
   (set (filter known-vars (cons expr (flatten expr)))))
 
-(defn ^::special terminal [expr]
+(declare special)
+
+(defn terminal [env expr]
   (fn [known-vars schema]
     (let [args (used-vars expr known-vars)]
       `(terminal-template '[~@args] (fn [[~@args]] ~expr)))))
 
-(defn ^::special fragment [& body]
+(defn fragment [env & body]
   (let [[exprs body] (lift-expressions (vec body))
         children (for [[paths expr] exprs]
-                   [paths (let [v (when-some [x (and (seq? expr) (first expr))]
-                                    (and (symbol? x) (some-> x resolve)))]
-                            (if (-> v meta ::special)
-                              (apply @v (next expr)) ; TODO inclusion
-                              (terminal expr)))])]
+                   [paths (let [{:keys [meta name]}
+                                (when-some [x (and (seq? expr) (first expr))]
+                                  (when (symbol? x) (some->> x (ana/resolve-var env))))]
+                            (if (::special meta)
+                              (apply @(resolve name) env (next expr)) ; TODO inclusion
+                              (terminal env expr)))])]
     (fn [known-vars schema]
       `(fragment-template ~body
          [~@(for [[path child] children] [`'~path (child known-vars schema)])]))))
 
-(defn ^::special with [q & body]
+(defn ^::special with [env q & body]
   (let [q (expand-query q)
         vars (implicit-vars q)
-        child (apply fragment body)]
+        child (apply fragment env body)]
     (fn [known-vars schema]
       (let [own-keys (keyvars q schema known-vars)
             known-vars (into known-vars vars)]
@@ -201,7 +207,7 @@
            ~(child known-vars schema))))))
 
 (defmacro deftemplate [name args & body]
-  (let [template (apply fragment body)
+  (let [template (apply fragment &env body)
         schema {}]
     `(def ~name ~(template (set args) schema))))
 
