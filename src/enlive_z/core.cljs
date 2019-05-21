@@ -1,6 +1,9 @@
 (ns enlive-z.core
   (:require-macros enlive-z.core)
-  (:require [datascript.core :as d]
+  (:refer-clojure :exclude [for])
+  (:require
+    [clojure.core :as clj]
+    [datascript.core :as d]
     [reagent.core :as r]))
 
 ; https://github.com/tonsky/datascript/wiki/Tips-&-tricks#editing-the-schema
@@ -33,7 +36,7 @@
   (-> (reduce ensure! component (pop path))
     (delete! (peek path))))
 
-(defn with-component [child ump!]
+(defn for-component [child ump!]
   (let [children (atom {})
         ordered-ks (atom [])
         doms (atom {})]
@@ -69,24 +72,24 @@
     (ensure! [c k] (ump! (f k)) nil)
     (delete! [c k] nil)))
 
-(defn with-template [q ks child]
+(defn for-template [q ks child]
   (let [[qks child] child
         qks (map #(cons [q ks] %) (cons [[[] []]] qks))] ; [[] []] is to help detect upserts
-    [qks #(with-component child %)]))
+    [qks #(for-component child %)]))
 
 (defn fragment-template [body children]
   (let [?child (gensym '?child)
-        qks (for [[i [path [qks]]] (map vector (range) children)
+        qks (clj/for [[i [path [qks]]] (map vector (range) children)
                   qk qks]
               (cons `[[[(~'ground ~i) ~?child]] [~?child]] qk))
-        children (vec (for [[path [qks f]] children]
+        children (vec (clj/for [[path [qks f]] children]
                         [path f]))]
     [qks #(fragment-component body children %)]))
 
 (defn terminal-template [args f]
   [[[[[] args]]] #(terminal-component f %)])
   
-(declare ^::special with ^::special fragment ^::special terminal)
+(declare ^::special for ^::special fragment ^::special terminal)
 
 (defn simplify [x]
   (if (sequential? x)
@@ -153,30 +156,25 @@
                     (f component path)))
         subscriptions (mapcat #(subscription % update!) qks)]
     (d/transact! conn subscriptions)
-    (r/render [#(let [x (first (simplify @dom))] (.log js/console "dom" (pr-str x)) x)] elt)))
+    (r/render [#(first (simplify @dom))] elt)))
 
 (comment
-  (let [click-count (r/atom 0)]
-  (r/render [(fn [] [[:div {:on-click #(swap! click-count inc)}
-                    "I have been clicked " @click-count " times."]])]
-    app))
-  
+  (require '[enlive-z.core :as ez] '[datascript.core :as d])
   (d/reset-conn! ez/conn (d/empty-db {}))
   (ez/deftemplate todo []
     [:ul
-     (ez/with {:db/id item [title done] :item/attrs}
-       [:li 
-        {:on-click [[:db/add item :item/done (not done)]]}
-        title " is " (if done "done!" "yet to do...")])])
-   (ez/mount todo app)
+     #_[:li [:form
+             {:on-submit {:item/title "new item" :item/done false}}
+             [:input {:type :text}] [:button {:type :submit}]]]
+     (ez/for {:db/id item [title done] :item/attrs}
+      [:li 
+       {:on-click [[:db/add item :item/done (not done)]]}
+       title " is " (if done "done!" "yet to do...")])])
+   (ez/mount todo (.-body js/document))
    (:tx-data (d/transact! ez/conn [{:item/title "something" :item/done false}
                                    {:item/title "something else" :item/done false}]))
    
-   
-   [:find ?child__57251__auto__ ?id57346 ?child__57251__auto__ ?title
-    :where [(ground 0) ?child__57251__auto__] [?id57346 :item/title ?title] [?id57346 :item/done ?done] [(ground 0) ?child__57251__auto__]]
-   [:find ?child__57251__auto__ ?id57346 ?child__57251__auto__ ?done
-    :where [(ground 0) ?child__57251__auto__] [?id57346 :item/title ?title] [?id57346 :item/done ?done] [(ground 1) ?child__57251__auto__]])
+ )
 
 
 #_ (let [[qks compo] todo

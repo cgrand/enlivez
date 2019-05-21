@@ -1,5 +1,7 @@
 (ns enlive-z.core
-  (:require [cljs.analyzer :as ana]))
+  (:refer-clojure :exclude [for])
+  (:require [clojure.core :as clj]
+    [cljs.analyzer :as ana]))
 
 ;; query maps syntax
 (defn- reverse-lookup
@@ -20,14 +22,14 @@
                    (cond
                      (= :or v) nil
                      (and (keyword? v) (= "attrs" (name v)))
-                     (for [x k]
+                     (clj/for [x k]
                        [(keyword (or (namespace v) (namespace x)) (name x)) (symbol (name x))])
                      :else [[k v]])))
                qmap)
         eid (:db/id qmap (gensym '?id))
         qmap (dissoc qmap :db/id)]
     {:eid eid
-     :clauses (for [[k v] qmap]
+     :clauses (clj/for [[k v] qmap]
                 ; PONDER: outputting recursive clauses after all non-rec
                 (if (map? v) ; recursive expansion
                   (let [{:keys [clauses], attr-eid :eid} (expand-query-map v)]
@@ -61,14 +63,14 @@
     (seq? clause)
     (case (first clause)
       and (if-some [[clause & clauses] (next clause)]
-            (for [a (dnf clause) b (dnf (cons 'and clauses))]
+            (clj/for [a (dnf clause) b (dnf (cons 'and clauses))]
               (concat a b))
             [[]])
       or (mapcat dnf (next clause))
       not (->> (dnf (cons 'and (next clause)))
             (reduce
               (fn [not-dnf conjunction]
-                (for [clause conjunction
+                (clj/for [clause conjunction
                       conjunction' not-dnf]
                   (conj conjunction' (list 'not clause))))
               [[]])))
@@ -138,7 +140,7 @@
                 (update :known (fnil into []) known-vars))
         sccs (scc (keys succs) succs)
         scc-of (into {}
-                 (for [scc sccs, var scc]
+                 (clj/for [scc sccs, var scc]
                    [var scc]))
         succs (into {}
                 (map (fn [[a bs]]
@@ -184,7 +186,7 @@
                            v)
                        [subexprs v] (lift-expressions known-vars v)]
                    [(into exprs
-                      (for [[path subexpr] subexprs]
+                      (clj/for [[path subexpr] subexprs]
                         [(cons k path) subexpr]))
                     (assoc x k v)]))
       [{} x] x)
@@ -200,7 +202,7 @@
 
 (defn fragment [env known-vars & body]
   (let [[exprs body] (lift-expressions known-vars (vec body))
-        children (for [[paths expr] exprs]
+        children (clj/for [[paths expr] exprs]
                    [paths (let [{:keys [meta name]}
                                 (when-some [x (and (seq? expr) (first expr))]
                                   (when (symbol? x) (some->> x (ana/resolve-var env))))]
@@ -209,16 +211,16 @@
                               (terminal env known-vars expr)))])]
     (fn [schema]
       `(fragment-template ~body
-         [~@(for [[path child] children] [`'~path (child schema)])]))))
+         [~@(clj/for [[path child] children] [`'~path (child schema)])]))))
 
-(defn with [env known-vars q & body]
+(defn for [env known-vars q & body]
   (let [q (expand-query q)
         vars (implicit-vars q)
         ?q (question-vars q)
         child (apply fragment env (into known-vars vars) body)]
     (fn [schema]
       (let [own-keys (map question-vars (keyvars q schema known-vars))]
-        `(with-template '~?q '~own-keys
+        `(for-template '~?q '~own-keys
            ~(child schema))))))
 
 (defmacro deftemplate [name args & body]
