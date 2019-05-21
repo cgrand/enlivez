@@ -142,10 +142,8 @@
               (prn 'DELTA delta)
               (f delta)))))}]))
 
-(def dom (r/atom nil))
-
 (defn mount [template elt]
-  (let [#_#_dom (r/atom nil)
+  (let [dom (r/atom nil)
         [qks instantiate!] template
         component (instantiate! #(reset! dom %))
         update! (fn [delta]
