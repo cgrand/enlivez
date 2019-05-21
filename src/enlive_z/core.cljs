@@ -15,6 +15,13 @@
         (doseq [[eid q f] (d/q '[:find ?eid ?q ?f :where [?eid ::live-query ?q] [?eid ::handler ?f]] db-after)]
           (f (d/q q db-after)))))))
 
+(defn txing-handler [f]
+  (fn [e]
+    (.preventDefault e) ; TODO: make it possible to opt out
+    (this-as this
+      (when-some [tx (.call f this e)]
+        (d/transact! conn (if (map? tx) [tx] tx))))))
+
 (defprotocol Component
   (ensure! [c k] "Returns the child component")
   (delete! [c k] "Deletes the child component"))
@@ -64,7 +71,7 @@
 
 (defn with-template [q ks child]
   (let [[qks child] child
-        qks (map #(cons [q ks] %) (cons nil qks))]
+        qks (map #(cons [q ks] %) (cons [[[] []]] qks))] ; [[] []] is to help detect upserts
     [qks #(with-component child %)]))
 
 (defn fragment-template [body children]
@@ -114,14 +121,19 @@
           (prn 'ROWS rows)
           (let [prev-paths @aprev-paths
                 ; I could also use a flat sorted map with the right order
-                paths (into {} (comp (map path-fn) (map (fn [path] [(take-nth 2 path) path]))) rows)
+                paths (into {} (comp (map path-fn) (map (fn [path] [(pop path) path]))) rows)
+                _ (prn 'PS paths)
                 deletions (reduce dissoc prev-paths (keys paths))
                 upserts  (into {}
                            (remove (fn [[ks path]] (= path (prev-paths ks))))
                            paths)
                 delta (-> #{}
-                        (into (map #(cons false %)) deletions)
-                        (into (map #(cons true %)) (vals upserts)))]
+                        (into (map #(conj % false)) (keys deletions))
+                        (into
+                          (comp
+                            (map #(if (= [] (peek %)) (pop %) %))
+                            (map #(conj % true)))
+                          (vals upserts)))]
             (reset! aprev-paths paths)
             (when (not= #{} delta)
               (prn 'DELTA delta)
@@ -134,8 +146,10 @@
         [qks instantiate!] template
         component (instantiate! #(reset! dom %))
         update! (fn [delta]
-                  (doseq [[upsert & path] delta
-                          :let [f (if upsert ensure-path! delete-path!)]]
+                  (doseq [path delta
+                          :let [upsert (peek path)
+                                path (pop path)
+                                f (if upsert ensure-path! delete-path!)]]
                     (f component path)))
         subscriptions (mapcat #(subscription % update!) qks)]
     (d/transact! conn subscriptions)
@@ -147,12 +161,16 @@
                     "I have been clicked " @click-count " times."]])]
     app))
   
+  (d/reset-conn! ez/conn (d/empty-db {}))
   (ez/deftemplate todo []
     [:ul
-     (ez/with {[title done] :item/attrs}
-       [:li title " is " (if done "done!" "yet to do...")])])
+     (ez/with {:db/id item [title done] :item/attrs}
+       [:li 
+        {:on-click [[:db/add item :item/done (not done)]]}
+        title " is " (if done "done!" "yet to do...")])])
    (ez/mount todo app)
-   (d/transact! ez/conn [{:item/title "something" :item/done false}])
+   (:tx-data (d/transact! ez/conn [{:item/title "something" :item/done false}
+                                   {:item/title "something else" :item/done false}]))
    
    
    [:find ?child__57251__auto__ ?id57346 ?child__57251__auto__ ?title

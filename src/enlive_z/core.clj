@@ -160,15 +160,29 @@
     :else x))
 
 ;; hiccup-style template
+(defn- handler [expr]
+  `(txing-handler (fn [~'%]
+                    (cljs.core/this-as ~'%this
+                      ~expr))))
+
+(defn- used-vars
+  "vars must be a predicate"
+  [expr known-vars]
+  ; TODO make it right: it's an overestimate
+  (set (filter known-vars (cons expr (flatten expr)))))
+
 (defn lift-expressions
   "Returns [expressions hollowed-x] where
    expressions is a sequence of [path expression] and hollowed-x is x where symbols and
    sequences have been replaced by nil."
-  [x]
+  [known-vars x]
   (cond
-    (indexed? x)
+    (associative? x)
     (reduce-kv (fn [[exprs x] k v]
-                 (let [[subexprs v] (lift-expressions v)]
+                 (let [v (if (and (keyword? k) (.startsWith (name k) "on-"))
+                           (handler v)
+                           v)
+                       [subexprs v] (lift-expressions known-vars v)]
                    [(into exprs
                       (for [[path subexpr] subexprs]
                         [(cons k path) subexpr]))
@@ -176,12 +190,6 @@
       [{} x] x)
     (or (symbol? x) (seq? x)) [{nil x} nil]
     :else [{} x]))
-
-(defn- used-vars
-  "vars must be a predicate"
-  [expr known-vars]
-  ; TODO make it right: it's an overestimate
-  (set (filter known-vars (cons expr (flatten expr)))))
 
 (declare special)
 
@@ -191,7 +199,7 @@
       `(terminal-template '[~@(map question-vars args)] (fn [[~@args]] ~expr)))))
 
 (defn fragment [env known-vars & body]
-  (let [[exprs body] (lift-expressions (vec body))
+  (let [[exprs body] (lift-expressions known-vars (vec body))
         children (for [[paths expr] exprs]
                    [paths (let [{:keys [meta name]}
                                 (when-some [x (and (seq? expr) (first expr))]
