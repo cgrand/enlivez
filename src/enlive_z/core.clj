@@ -185,37 +185,36 @@
 
 (declare special)
 
-(defn terminal [env expr]
-  (fn [known-vars schema]
-    (let [args (used-vars expr known-vars)]
+(defn terminal [env known-vars expr]
+  (let [args (used-vars expr known-vars)]
+    (fn [schema]
       `(terminal-template '[~@(map question-vars args)] (fn [[~@args]] ~expr)))))
 
-(defn fragment [env & body]
+(defn fragment [env known-vars & body]
   (let [[exprs body] (lift-expressions (vec body))
         children (for [[paths expr] exprs]
                    [paths (let [{:keys [meta name]}
                                 (when-some [x (and (seq? expr) (first expr))]
                                   (when (symbol? x) (some->> x (ana/resolve-var env))))]
                             (if (::special meta)
-                              (apply @(resolve name) env (next expr)) ; TODO inclusion
-                              (terminal env expr)))])]
-    (fn [known-vars schema]
+                              (apply @(resolve name) env known-vars (next expr)) ; TODO inclusion
+                              (terminal env known-vars expr)))])]
+    (fn [schema]
       `(fragment-template ~body
-         [~@(for [[path child] children] [`'~path (child known-vars schema)])]))))
+         [~@(for [[path child] children] [`'~path (child schema)])]))))
 
-(defn with [env q & body]
+(defn with [env known-vars q & body]
   (let [q (expand-query q)
         vars (implicit-vars q)
         ?q (question-vars q)
-        child (apply fragment env body)]
-    (fn [known-vars schema]
-      (let [own-keys (map question-vars (keyvars q schema known-vars))
-            known-vars (into known-vars vars)]
-        `(with-template '~?q '~own-keys '~known-vars
-           ~(child known-vars schema))))))
+        child (apply fragment env (into known-vars vars) body)]
+    (fn [schema]
+      (let [own-keys (map question-vars (keyvars q schema known-vars))]
+        `(with-template '~?q '~own-keys
+           ~(child schema))))))
 
 (defmacro deftemplate [name args & body]
-  (let [template (apply fragment &env body)
+  (let [template (apply fragment &env (set args) body)
         schema {}]
-    `(def ~name ~(template (set args) schema))))
+    `(def ~name ~(template schema))))
 

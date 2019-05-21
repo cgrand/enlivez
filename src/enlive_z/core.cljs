@@ -62,7 +62,7 @@
     (ensure! [c k] (ump! (f k)) nil)
     (delete! [c k] nil)))
 
-(defn with-template [q ks vars child]
+(defn with-template [q ks child]
   (let [[qks child] child
         qks (map #(cons [q ks] %) (cons nil qks))]
     [qks #(with-component child %)]))
