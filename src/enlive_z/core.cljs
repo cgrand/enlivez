@@ -68,9 +68,9 @@
     [qks #(with-component child %)]))
 
 (defn fragment-template [body children]
-  (let [qks (for [[i [path [qks]]] (map vector (range) children)
-                  qk qks
-                  :let [?child (gensym '?child)]]
+  (let [?child (gensym '?child)
+        qks (for [[i [path [qks]]] (map vector (range) children)
+                  qk qks]
               (cons `[[[(~'ground ~i) ~?child]] [~?child]] qk))
         children (vec (for [[path [qks f]] children]
                         [path f]))]
