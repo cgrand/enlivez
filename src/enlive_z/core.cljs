@@ -9,86 +9,116 @@
 ; https://github.com/tonsky/datascript/wiki/Tips-&-tricks#editing-the-schema
 
 ;; Datasource is only accessible through subscription
+(def ^:private ^:dynamic *reentrant* false)
+
 (def conn
-  (doto (d/create-conn {#_#_::child {:db/valueType :db.type/ref
-                                     :db/isComponent true
-                                     :db/cardinality :db.cardinality/many}})
+  (doto (d/create-conn {::child {:db/valueType :db.type/ref
+                                 :db/isComponent true
+                                 :db/cardinality :db.cardinality/many}
+                        ::key {:db/unique :db.unique/identity}})
     (d/listen! ::meta-subscriber
       (fn [{:keys [tx-data db-after]}]
-        (doseq [[eid q f] (d/q '[:find ?eid ?q ?f :where [?eid ::live-query ?q] [?eid ::handler ?f]] db-after)]
-          (f (d/q q db-after)))))))
+        (when-not *reentrant*
+          (binding [*reentrant* true]
+           (doseq [[eid q f] (d/q '[:find ?eid ?q ?f :where [?eid ::live-query ?q] [?eid ::handler ?f]] db-after)]
+             (f (d/q q db-after)))))))))
 
 (defn txing-handler [f]
   (fn [e]
-    (.preventDefault e) ; TODO: make it possible to opt out
+    #_(.preventDefault e) ; TODO: make it possible to opt out
+    #_(.stopPropagation e) ; TODO: make it possible to opt out
     (this-as this
       (when-some [tx (.call f this e)]
         (d/transact! conn (if (map? tx) [tx] tx))))))
 
 (defprotocol Component
-  (ensure! [c k] "Returns the child component")
+  (ensure! [c ks] "Returns the child component for (peek ks)")
   (delete! [c k] "Deletes the child component"))
 
 (defn ensure-path! [component path]
-  (reduce ensure! component path))
+  (.log js/console "path" (pr-str path))
+  (reduce ensure! component (next (reductions conj [] path))))
 
 (defn delete-path! [component path]
   (-> (reduce ensure! component (pop path))
     (delete! (peek path))))
 
-(defn for-component [child ump!]
+(defn for-component [child ump! parent-state-eid flat-ks]
   (let [children (atom {})
         ordered-ks (atom [])
         doms (atom {})]
     (reify Component
-      (ensure! [c k]
-        (or (@children k)
-          (let [child (child
-                        #(let [doms (swap! doms assoc k %)]
-                           (ump! (map doms @ordered-ks))))]
-            (swap! ordered-ks conj k)
-            (swap! children assoc k child)
-            child)))
+      (ensure! [c ks]
+        (let [k (peek ks)]
+          (or (@children k)
+            (let [child (child
+                          #(let [doms (swap! doms assoc k %)]
+                             (ump! (map doms @ordered-ks)))
+                          parent-state-eid (into flat-ks k))]
+              (swap! ordered-ks conj k)
+              (swap! children assoc k child)
+              child))))
       (delete! [c k]
         (swap! ordered-ks #(vec (remove #{k} %)))
         (swap! children dissoc k)
         (swap! doms dissoc k)
         nil))))
 
-(defn fragment-component [dom children ump!]
+(defn fragment-component [dom children ump! parent-state-eid flat-ks]
   (let [adom (atom dom)
         children
         (into []
-          (map (fn [[path child]]
-                 (child #(ump! (swap! adom assoc-in path %)))))
+          (map-indexed
+            (fn [i [path child]]
+              (child #(ump! (swap! adom assoc-in path %)) parent-state-eid
+                (conj flat-ks i))))
           children)]
     (ump! dom)
     (reify Component
-      (ensure! [c [i]] (nth children i))
+      (ensure! [c ks] (let [[i] (peek ks)] (if (some? i)
+                                             (nth children i)
+                                             c)))
       (delete! [c k] nil))))
 
-(defn terminal-component [f ump!]
+(defn terminal-component [f ump! parent-state-eid flat-ks]
   (reify Component
-    (ensure! [c k] (ump! (f k)) nil)
+    (ensure! [c ks] (ump! (f (peek ks))) nil)
     (delete! [c k] nil)))
+
+(defn state-component [entity-map child ump! parent-state-eid flat-ks]
+  (prn 'CREATING 'STATE)
+  (let [entity-map (assoc entity-map :db/id -1 ::key flat-ks)
+        {state-eid -1} (:tempids (d/transact! conn [entity-map [:db/add parent-state-eid ::child -1]]))
+        child (child ump! state-eid flat-ks)]
+    (reify Component
+      (ensure! [c k] (ensure! child k))
+      (delete! [c k]
+        (try
+          (delete! child k)
+          (finally
+            (d/transact! conn [[:db/retract parent-state-eid ::child state-eid]
+                               [:db/retractEntity state-eid]]))) ))))
 
 (defn for-template [q ks child]
   (let [[qks child] child
         qks (map #(cons [q ks] %) (cons [[[] []]] qks))] ; [[] []] is to help detect upserts
-    [qks #(for-component child %)]))
+    [qks #(for-component child %1 %2 %3)]))
 
 (defn fragment-template [body children]
-  (let [?child (gensym '?child)
-        qks (clj/for [[i [path [qks]]] (map vector (range) children)
+  (let [qks (clj/for [[i [path [qks]]] (map vector (range) children)
                   qk qks]
-              (cons `[[[(~'ground ~i) ~?child]] [~?child]] qk))
+              (cons [[] i] qk))
         children (vec (clj/for [[path [qks f]] children]
                         [path f]))]
-    [qks #(fragment-component body children %)]))
+    [qks #(fragment-component body children %1 %2 %3)]))
 
 (defn terminal-template [args f]
-  [[[[[] args]]] #(terminal-component f %)])
-  
+  [[[[[] args]]] #(terminal-component f %1 %2 %3)])
+
+(defn state-template [entity-map entity-q child]
+  (let [[qks child] child]
+    [(map #(cons [entity-q []] %) qks) #(state-component entity-map child %1 %2 %3)]))
+
 (declare ^::special for ^::special fragment ^::special terminal)
 
 (defn simplify [x]
@@ -102,12 +132,28 @@
   "Flattens a hierarchical query to a pair [actual-query f] where f
    is a function to map a row to a path."
   [hq]
-  (let [where (mapcat first hq)
-        find (mapcat second hq)
-        seg-fns (mapv (fn [[from to]]
-                        #(subvec % from to))
-                  (partition 2 1 
-                    (reductions + 0 (map (fn [[_ k]] (count k)) hq))))]
+  (let [[where find ks seg-fns]
+        (reduce
+          (fn [[where find ks seg-fns] [q k]]
+            (let [q (if (= `if-state (first q))
+                      (let [[_ eid then else] q
+                            ?sk (gensym '?sk)]
+                        [[(cons 'vector ks) ?sk]
+                         (list 'or
+                           (list* 'and [eid ::key ?sk] then)
+                           (list* 'and (list 'not [eid ::key ?sk]) [(list 'ground (name (gensym "eid"))) eid] else))])
+                      q)
+                  seg-fn (if (number? k)
+                           (constantly [k])
+                           (let [from (count find)
+                                 to (+ from (count k))]
+                             #(subvec % from to)))
+                  k (if (number? k) nil k)]
+              [(into where q)
+               (into find (if (number? k) nil k))
+               (into ks (if (number? k) [k] k))
+               (conj seg-fns seg-fn)]))
+          [[] [] [] []] hq)]
     [`[:find ~@find :where ~@where]
      (fn [row] (into [] (map #(% row)) seg-fns))]))
 
@@ -116,8 +162,8 @@
    Upon subscription f receives a (positive only) delta representing the current state."
   [hq f]
   (let [[q path-fn] (flatten-q hq)]
-    (prn q)
-    [{::live-query q
+    [{::live-query (doto q (->> pr-str (.log js/console "Q"))
+                     (->> (prn 'Q)))
       ::handler
       (let [aprev-paths (atom {})]
         (fn [rows]
@@ -125,7 +171,6 @@
           (let [prev-paths @aprev-paths
                 ; I could also use a flat sorted map with the right order
                 paths (into {} (comp (map path-fn) (map (fn [path] [(pop path) path]))) rows)
-                _ (prn 'PS paths)
                 deletions (reduce dissoc prev-paths (keys paths))
                 upserts  (into {}
                            (remove (fn [[ks path]] (= path (prev-paths ks))))
@@ -145,42 +190,38 @@
 (defn mount [template elt]
   (let [dom (r/atom nil)
         [qks instantiate!] template
-        component (instantiate! #(reset! dom %))
+        {root-eid -1} (:tempids (d/transact! conn [[:db/add -1 ::root true]]))
+        component (instantiate! #(reset! dom %) root-eid [])
         update! (fn [delta]
                   (doseq [path delta
                           :let [upsert (peek path)
                                 path (pop path)
                                 f (if upsert ensure-path! delete-path!)]]
                     (f component path)))
-        subscriptions (mapcat #(subscription % update!) qks)]
+        subscriptions (vec (mapcat #(subscription % update!) qks))]
     (d/transact! conn subscriptions)
-    (r/render [#(first (simplify @dom))] elt)))
+    (r/render [#(doto (first (simplify @dom)) prn)] elt)))
 
 (comment
   (require '[enlive-z.core :as ez] '[datascript.core :as d])
   (d/reset-conn! ez/conn (d/empty-db {}))
   (ez/deftemplate todo []
+    :init {::new-todo ""}
+    :state {:db/id self
+            [new-todo] ::attrs}
     [:ul
-     #_[:li [:form
-             {:on-submit {:item/title "new item" :item/done false}}
-             [:input {:type :text}] [:button {:type :submit}]]]
+     [:li
+      [:input {:value new-todo
+               :on-change [[:db/add self ::new-todo (-> % .-target .-value)]]}]
+      [:button {:disabled (= "" new-todo)
+                :on-click [{:item/title new-todo :item/done false}
+                           [:db/add self ::new-todo ""]]}]]
      (ez/for {:db/id item [title done] :item/attrs}
-      [:li 
-       {:on-click [[:db/add item :item/done (not done)]]}
-       title " is " (if done "done!" "yet to do...")])])
+       [:li 
+        {:on-click [[:db/add item :item/done (not done)]]}
+        title " is " (if done "done!" "yet to do...")])])
    (ez/mount todo (.-body js/document))
    (:tx-data (d/transact! ez/conn [{:item/title "something" :item/done false}
                                    {:item/title "something else" :item/done false}]))
    
- )
-
-
-#_ (let [[qks compo] todo
-           dom (atom nil)] ; "hiccup dom" pour les tests
-      (doto (compo #(reset! dom %)) ; on monte le composant
-        ; send updates
-        (ez/ensure-path! [[0] [12345] [0] ["World domination"]])
-        (ez/ensure-path! [[0] [12345] [1] [false]])
-        (ez/ensure-path! [[0] [78910] [0] ["Buy AirPods"]])
-        (ez/ensure-path! [[0] [78910] [1] [true]]))
-      (r/render (ez/simplify @dom) app))
+   )

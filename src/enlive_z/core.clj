@@ -1,7 +1,8 @@
 (ns enlive-z.core
   (:refer-clojure :exclude [for])
   (:require [clojure.core :as clj]
-    [cljs.analyzer :as ana]))
+    [cljs.analyzer :as ana]
+    [clojure.spec.alpha :as s]))
 
 ;; query maps syntax
 (defn- reverse-lookup
@@ -10,39 +11,43 @@
   (when-some [[_ n] (when (keyword? k) (re-matches #"_(.*)" (name k)))]
     (keyword (namespace k) n)))
 
+(defn unsugar-query-map [qmap]
+  {:defaults (into {} (keep (fn [[k v]] (case v :or k nil))) qmap)
+   ; expand :attrs and remove :or
+   :qmap (into {}
+           (mapcat
+             (fn [[k v]]
+               (cond
+                 (= :or v) nil
+                 (and (keyword? v) (= "attrs" (name v)))
+                 (clj/for [x k]
+                   [(keyword (or (namespace v) (namespace x)) (name x)) (symbol (name x))])
+                 :else [[k v]])))
+           qmap)})
+
 (defn expand-query-map
   ; leveraging the spec is much work but it means the spec and this code
   ; may more easily drift away.
   [qmap]
-  (let [defaults (into {} (keep (fn [[k v]] (case v :or k nil))) qmap)
-        ; expand :attrs and remove :or
-        qmap (into {}
-               (mapcat
-                 (fn [[k v]]
-                   (cond
-                     (= :or v) nil
-                     (and (keyword? v) (= "attrs" (name v)))
-                     (clj/for [x k]
-                       [(keyword (or (namespace v) (namespace x)) (name x)) (symbol (name x))])
-                     :else [[k v]])))
-               qmap)
+  (let [{:keys [defaults qmap]} (unsugar-query-map qmap)
         eid (:db/id qmap (gensym '?id))
         qmap (dissoc qmap :db/id)]
     {:eid eid
-     :clauses (clj/for [[k v] qmap]
-                ; PONDER: outputting recursive clauses after all non-rec
-                (if (map? v) ; recursive expansion
-                  (let [{:keys [clauses], attr-eid :eid} (expand-query-map v)]
-                    (cons
-                      (if-some [k (reverse-lookup k)]
-                        [attr-eid k eid]
-                        [eid k attr-eid])
-                      clauses))
-                  (if-some [k (reverse-lookup k)]
-                      [v k eid]
-                      (if-some [[_ default] (find defaults k)]
-                        [(list 'get-else eid k default) v]
-                        [eid k v]))))}))
+     :clauses (vec
+                (clj/for [[k v] qmap]
+                  ; PONDER: outputting recursive clauses after all non-rec
+                  (if (map? v) ; recursive expansion
+                    (let [{:keys [clauses], attr-eid :eid} (expand-query-map v)]
+                      (cons
+                        (if-some [k (reverse-lookup k)]
+                          [attr-eid k eid]
+                          [eid k attr-eid])
+                        clauses))
+                    (if-some [k (reverse-lookup k)]
+                        [v k eid]
+                        (if-some [[_ default] (find defaults v)]
+                          [(list 'get-else '$ eid k default) v]
+                          [eid k v])))))}))
 
 (defn expand-query [x]
   (let [x (if (map? x) [x] x)]
@@ -158,8 +163,24 @@
   (cond
     (seq? x) (cons (first x) (map question-vars (next x)))
     (vector? x) (into [] (map question-vars) x)
-    (and (symbol? x) (not (.startsWith (name x) "?"))) (symbol (str "?" (name x)))
+    (and (symbol? x) (not (#{'_ '$} x)) (not (.startsWith (name x) "?"))) (symbol (str "?" (name x)))
     :else x))
+
+;; state
+
+(defn default-clauses [init qmap]
+  (let [{:keys [defaults qmap]} (unsugar-query-map qmap)
+        qmap (dissoc qmap :db/id)]
+    ; no recursion? 
+    ; support for recursive inits needs to be added on the transacting side upon instantiation too
+    (clj/for [[k v] qmap]
+      (if-some [v' (init k (defaults v))]
+        (case [(symbol? v) (symbol? v')]
+          [true true] [(list '= v v')]
+          [true false] [(list 'ground v') v]
+          [false true] [(list 'ground v) v']
+          [(list '= v v')])
+        (throw (ex-info (str "Init state can't satisfy state query; no default for " k) {:key k :init init :qmap qmap}))))))
 
 ;; hiccup-style template
 (defn- handler [expr]
@@ -171,7 +192,7 @@
   "vars must be a predicate"
   [expr known-vars]
   ; TODO make it right: it's an overestimate
-  (set (filter known-vars (cons expr (flatten expr)))))
+  (set (filter known-vars (cons expr (tree-seq coll? seq expr)))))
 
 (defn lift-expressions
   "Returns [expressions hollowed-x] where
@@ -193,14 +214,13 @@
     (or (symbol? x) (seq? x)) [{nil x} nil]
     :else [{} x]))
 
-(declare special)
-
 (defn terminal [env known-vars expr]
+  (prn 'TERM expr)
   (let [args (used-vars expr known-vars)]
     (fn [schema]
       `(terminal-template '[~@(map question-vars args)] (fn [[~@args]] ~expr)))))
 
-(defn fragment [env known-vars & body]
+(defn fragment* [env known-vars body]
   (let [[exprs body] (lift-expressions known-vars (vec body))
         children (clj/for [[paths expr] exprs]
                    [paths (let [{:keys [meta name]}
@@ -213,6 +233,40 @@
       `(fragment-template ~body
          [~@(clj/for [[path child] children] [`'~path (child schema)])]))))
 
+(defn state [env known-vars init qmap body]
+  ; TODO: init may have vars
+  (let [{:keys [eid clauses]} (expand-query-map qmap)
+        default-clauses (default-clauses init qmap)
+        vars (doto (conj (implicit-vars clauses) eid) (->> (prn 'VARS)))
+        eid (question-vars eid)
+        clauses (map question-vars clauses)
+        default-clauses (map question-vars default-clauses)
+        child (fragment* env (into known-vars vars) body)]
+    (fn [schema]
+      `(state-template '~init '(if-state ~eid ~clauses ~default-clauses) ~(child schema)))))
+
+(s/def ::fragment-body
+  (s/cat
+    :options (s/* (s/cat :key keyword? :value any?))
+    :body (s/* any?)))
+
+(defmacro ^:private if-valid
+  ([bindings+spec+value then] `(if-valid ~bindings+spec+value ~then nil))
+  ([[bindings spec value] then else]
+    `(let [conformed# (s/conform ~spec ~value)]
+       (if (= ::s/invalid conformed#)
+         ~else
+         (let [~bindings conformed#]
+           ~then)))))
+
+(defn fragment [env known-vars & body]
+  (if-valid [{:keys [body options]} ::fragment-body body]
+    (let [{:keys [init] qmap :state} (into {} (map (juxt :key :value)) options)]
+      (if qmap
+        (state env known-vars (or init {}) qmap body)
+        (fragment* env known-vars body)))
+    (throw (ex-info "Invalid body" {:body body}))))
+
 (defn for [env known-vars q & body]
   (let [q (expand-query q)
         vars (implicit-vars q)
@@ -223,8 +277,18 @@
         `(for-template '~?q '~own-keys
            ~(child schema))))))
 
+#_(or (and [eid ::key XXX] ...)
+   (and (not [_ ::key XXX]) [(ground -1) eid]))
+
 (defmacro deftemplate [name args & body]
   (let [template (apply fragment &env (set args) body)
         schema {}]
     `(def ~name ~(template schema))))
 
+
+
+
+#_(defmacro defrule [rulename args & clauses]
+   (if (seq? args)
+     `(do
+        ~@(map (fn [args+clauses] `(defrule ~rulename ~@args+clauses)) (cons args clauses)))))
