@@ -36,18 +36,20 @@
   (delete! [c k] "Deletes the child component"))
 
 (defn ensure-path! [component path]
-  (.log js/console "path" (pr-str path))
   (reduce ensure! component (next (reductions conj [] path))))
 
 (defn delete-path! [component path]
-  (-> (reduce ensure! component (pop path))
+  (some-> (reduce get component (pop path))
     (delete! (peek path))))
 
 (defn for-component [child ump! parent-state-eid flat-ks]
   (let [children (atom {})
         ordered-ks (atom [])
         doms (atom {})]
-    (reify Component
+    (reify 
+      ILookup
+      (-lookup [c k] (@children k))
+      Component
       (ensure! [c ks]
         (let [k (peek ks)]
           (or (@children k)
@@ -62,6 +64,7 @@
         (swap! ordered-ks #(vec (remove #{k} %)))
         (swap! children dissoc k)
         (swap! doms dissoc k)
+        (ump! (map doms @ordered-ks))
         nil))))
 
 (defn fragment-component [dom children ump! parent-state-eid flat-ks]
@@ -74,24 +77,35 @@
                 (conj flat-ks i))))
           children)]
     (ump! dom)
-    (reify Component
-      (ensure! [c ks] (let [[i] (peek ks)] (if (some? i)
-                                             (nth children i)
-                                             c)))
+    (reify
+      ILookup
+      (-lookup [c k]
+        (let [[i] k]
+          (if (some? i)
+            (nth children i)
+            c)))
+      Component
+      (ensure! [c ks] (get c (peek ks)))
       (delete! [c k] nil))))
 
 (defn terminal-component [f ump! parent-state-eid flat-ks]
-  (reify Component
+  (reify
+    ILookup
+    (-lookup [c k] nil)
+    Component
     (ensure! [c ks] (ump! (f (peek ks))) nil)
     (delete! [c k] nil)))
 
 (defn state-component [entity-map child ump! parent-state-eid flat-ks]
   (prn 'CREATING 'STATE)
-  (let [entity-map (assoc entity-map :db/id -1 ::key flat-ks)
+  (let [entity-map (assoc entity-map :db/id -1 ::key (apply pr-str flat-ks)) ; added apply pr-str because https://github.com/tonsky/datascript/issues/262
         {state-eid -1} (:tempids (d/transact! conn [entity-map [:db/add parent-state-eid ::child -1]]))
         child (child ump! state-eid flat-ks)]
-    (reify Component
-      (ensure! [c k] (ensure! child k))
+    (reify
+      ILookup
+      (-lookup [c k] (-lookup child k))
+      Component
+      (ensure! [c ks] (ensure! child ks))
       (delete! [c k]
         (try
           (delete! child k)
@@ -132,23 +146,24 @@
   "Flattens a hierarchical query to a pair [actual-query f] where f
    is a function to map a row to a path."
   [hq]
+  (prn 'HQ hq)
   (let [[where find ks seg-fns]
         (reduce
           (fn [[where find ks seg-fns] [q k]]
             (let [q (if (= `if-state (first q))
                       (let [[_ eid then else] q
                             ?sk (gensym '?sk)]
-                        [[(cons 'vector ks) ?sk]
+                        [[(cons 'pr-str ks) ?sk] ; was 'vector but https://github.com/tonsky/datascript/issues/262
                          (list 'or
                            (list* 'and [eid ::key ?sk] then)
-                           (list* 'and (list 'not [eid ::key ?sk]) [(list 'ground (name (gensym "eid"))) eid] else))])
+                           (list* 'and (list 'not [eid ::key ?sk])
+                             [(list 'list ::key ?sk) eid] else))]) ; was 'vector but https://github.com/tonsky/datascript/issues/262
                       q)
                   seg-fn (if (number? k)
                            (constantly [k])
                            (let [from (count find)
                                  to (+ from (count k))]
-                             #(subvec % from to)))
-                  k (if (number? k) nil k)]
+                             #(into [] (subvec % from to))))] ; https://clojure.atlassian.net/browse/CLJS-3092
               [(into where q)
                (into find (if (number? k) nil k))
                (into ks (if (number? k) [k] k))
@@ -162,12 +177,10 @@
    Upon subscription f receives a (positive only) delta representing the current state."
   [hq f]
   (let [[q path-fn] (flatten-q hq)]
-    [{::live-query (doto q (->> pr-str (.log js/console "Q"))
-                     (->> (prn 'Q)))
+    [{::live-query q
       ::handler
       (let [aprev-paths (atom {})]
         (fn [rows]
-          (prn 'ROWS rows)
           (let [prev-paths @aprev-paths
                 ; I could also use a flat sorted map with the right order
                 paths (into {} (comp (map path-fn) (map (fn [path] [(pop path) path]))) rows)
@@ -184,6 +197,7 @@
                           (vals upserts)))]
             (reset! aprev-paths paths)
             (when (not= #{} delta)
+              (prn 'Q q)
               (prn 'DELTA delta)
               (f delta)))))}]))
 
@@ -200,11 +214,14 @@
                     (f component path)))
         subscriptions (vec (mapcat #(subscription % update!) qks))]
     (d/transact! conn subscriptions)
-    (r/render [#(doto (first (simplify @dom)) prn)] elt)))
+    (r/render [#(first (simplify @dom))] elt)))
 
 (comment
   (require '[enlive-z.core :as ez] '[datascript.core :as d])
-  (d/reset-conn! ez/conn (d/empty-db {}))
+  (d/reset-conn! ez/conn (d/empty-db {:enlive-z.core/child {:db/valueType :db.type/ref
+                                                            :db/isComponent true
+                                                            :db/cardinality :db.cardinality/many}
+                                      :enlive-z.core/key {:db/unique :db.unique/identity}}))
   (ez/deftemplate todo []
     :init {::new-todo ""}
     :state {:db/id self
@@ -217,11 +234,21 @@
                 :on-click [{:item/title new-todo :item/done false}
                            [:db/add self ::new-todo ""]]}]]
      (ez/for {:db/id item [title done] :item/attrs}
-       [:li 
-        {:on-click [[:db/add item :item/done (not done)]]}
-        title " is " (if done "done!" "yet to do...")])])
+       :state {:db/id self2
+               [editing] ::attrs
+               {editing false} :or}
+       [:li (str item) "/" (pr-str self2)
+        [:input {:type :checkbox :checked done
+                 :on-change [[:db/add item :item/done (not done)]]}]
+        [:span {:on-click (doto [[:db/add self2 ::editing (not editing)]] (->> (prn 'CLICK)))} 
+         title
+         (ez/for {:falsy editing} title)
+         #_(ez/for [[(= editing false)]] title)
+         #_(ez/for [[(= editing true)]] "toto")]])])
    (ez/mount todo (.-body js/document))
-   (:tx-data (d/transact! ez/conn [{:item/title "something" :item/done false}
+   (:tx-data (d/transact! ez/conn [{:falsy false}
+                                   {:truthy true}
+                                   {:item/title "something" :item/done false}
                                    {:item/title "something else" :item/done false}]))
    
    )
