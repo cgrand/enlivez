@@ -59,12 +59,13 @@
                           parent-state-eid (into flat-ks k))]
               (swap! ordered-ks conj k)
               (swap! children assoc k child)
+              (ump! (map @doms @ordered-ks))
               child))))
       (delete! [c k]
         (swap! ordered-ks #(vec (remove #{k} %)))
         (swap! children dissoc k)
         (swap! doms dissoc k)
-        (ump! (map doms @ordered-ks))
+        (ump! (map @doms @ordered-ks))
         nil))))
 
 (defn fragment-component [dom children ump! parent-state-eid flat-ks]
@@ -97,7 +98,6 @@
     (delete! [c k] nil)))
 
 (defn state-component [entity-map child ump! parent-state-eid flat-ks]
-  (prn 'CREATING 'STATE)
   (let [entity-map (assoc entity-map :db/id -1 ::key (apply pr-str flat-ks)) ; added apply pr-str because https://github.com/tonsky/datascript/issues/262
         {state-eid -1} (:tempids (d/transact! conn [entity-map [:db/add parent-state-eid ::child -1]]))
         child (child ump! state-eid flat-ks)]
@@ -197,7 +197,7 @@
                           (vals upserts)))]
             (reset! aprev-paths paths)
             (when (not= #{} delta)
-              (prn 'Q q)
+              #_(prn 'Q q)
               (prn 'DELTA delta)
               (f delta)))))}]))
 
@@ -232,23 +232,25 @@
                :on-change [[:db/add self ::new-todo (-> % .-target .-value)]]}]
       [:button {:disabled (= "" new-todo)
                 :on-click [{:item/title new-todo :item/done false}
-                           [:db/add self ::new-todo ""]]}]]
+                            ]}]]
      (ez/for {:db/id item [title done] :item/attrs}
        :state {:db/id self2
-               [editing] ::attrs
-               {editing false} :or}
-       [:li (str item) "/" (pr-str self2)
+               [editing working-title] ::attrs
+               {editing false
+                working-title ""} :or}
+       [:li
         [:input {:type :checkbox :checked done
                  :on-change [[:db/add item :item/done (not done)]]}]
-        [:span {:on-click (doto [[:db/add self2 ::editing (not editing)]] (->> (prn 'CLICK)))} 
-         title
-         (ez/for {:falsy editing} title)
-         #_(ez/for [[(= editing false)]] title)
-         #_(ez/for [[(= editing true)]] "toto")]])])
+        [:span {:on-click (when (not editing) [{:db/id self2 ::editing true ::working-title title}])} 
+         (ez/for [[(= editing false)]] title)
+         (ez/for [[(= editing true)]]
+           [:input {:value working-title
+                    :on-change [[:db/add self2 ::working-title (-> % .-target .-value)]]
+                    :on-blur (doto [[:db/add self2 ::editing false]
+                                    [:db/add item :item/title working-title]]
+                               (->> (prn 'BLUR working-title)))}])]])])
    (ez/mount todo (.-body js/document))
-   (:tx-data (d/transact! ez/conn [{:falsy false}
-                                   {:truthy true}
-                                   {:item/title "something" :item/done false}
+   (:tx-data (d/transact! ez/conn [{:item/title "something" :item/done false}
                                    {:item/title "something else" :item/done false}]))
    
    )

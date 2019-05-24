@@ -118,8 +118,10 @@
                     ; emit nothing on not: imagine (not [?a :ident/attr :k])
                     not nil)
                   ; else must be a vector
-                  (let [[e a v] (into clause '[_ _ _])]
-                    (when-not (or (= '_ e) (symbol? a) (= '_ v))
+                  (let [[e a v] (into clause '[_ _ _])
+                        e (cond-> e (= '_ e) gensym)
+                        v (cond-> v (= '_ v) gensym)]
+                    (when-not (symbol? a)
                       (cond
                         (symbol? e)
                         (cond
@@ -215,8 +217,8 @@
     :else [{} x]))
 
 (defn terminal [env known-vars expr]
-  (prn 'TERM expr)
   (let [args (used-vars expr known-vars)]
+    (prn 'TERM args expr)
     (fn [schema]
       `(terminal-template '[~@(map question-vars args)] (fn [[~@args]] ~expr)))))
 
@@ -277,16 +279,10 @@
         `(for-template '~?q '~own-keys
            ~(child schema))))))
 
-#_(or (and [eid ::key XXX] ...)
-   (and (not [_ ::key XXX]) [(ground -1) eid]))
-
 (defmacro deftemplate [name args & body]
   (let [template (apply fragment &env (set args) body)
         schema {}]
     `(def ~name ~(template schema))))
-
-
-
 
 #_(defmacro defrule [rulename args & clauses]
    (if (seq? args)
