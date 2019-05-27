@@ -98,7 +98,7 @@
     (delete! [c k] nil)))
 
 (defn state-component [entity-map child ump! parent-state-eid flat-ks]
-  (let [entity-map (assoc entity-map :db/id -1 ::key (apply pr-str flat-ks)) ; added apply pr-str because https://github.com/tonsky/datascript/issues/262
+  (let [entity-map (assoc entity-map :db/id -1 ::key flat-ks) ; added apply pr-str because https://github.com/tonsky/datascript/issues/262
         {state-eid -1} (:tempids (d/transact! conn [entity-map [:db/add parent-state-eid ::child -1]]))
         child (child ump! state-eid flat-ks)]
     (reify
@@ -153,11 +153,11 @@
             (let [q (if (= `if-state (first q))
                       (let [[_ eid then else] q
                             ?sk (gensym '?sk)]
-                        [[(cons 'pr-str ks) ?sk] ; was 'vector but https://github.com/tonsky/datascript/issues/262
+                        [[(cons 'vector ks) ?sk] ; was 'vector but https://github.com/tonsky/datascript/issues/262
                          (list 'or
                            (list* 'and [eid ::key ?sk] then)
                            (list* 'and (list 'not [eid ::key ?sk])
-                             [(list 'list ::key ?sk) eid] else))]) ; was 'vector but https://github.com/tonsky/datascript/issues/262
+                             [(list 'vector ::key ?sk) eid] else))]) ; was 'vector but https://github.com/tonsky/datascript/issues/262
                       q)
                   seg-fn (if (number? k)
                            (constantly [k])

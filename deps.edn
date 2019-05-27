@@ -1,0 +1,17 @@
+{:deps
+ {datascript {:mvn/version "0.18.3"}
+  org.clojure/clojure {:mvn/version "1.10.0"}
+  org.clojure/clojurescript {:mvn/version "1.10.520"
+                             :mvn/exclusions [[com.google.guava/guava]]}
+  org.clojure/core.async {:mvn/version "0.4.490"}
+  reagent {:mvn/version "0.8.1"}}
+
+ :aliases
+  ;;; ClojureScript Figwheel REPL
+ {:fw
+  {:extra-deps {com.bhauman/figwheel-main {:mvn/version "0.2.0"}}
+   :extra-paths ["src" "dev_cljs" "target"]
+   :main-opts ["-m" "figwheel.main"
+               ; "--compile-opts" "dev.cljs.edn:@mod.cljs.edn"
+               ; "--compile"
+               "--repl"]}}}
