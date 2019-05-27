@@ -11,22 +11,21 @@
     [:input {:value new-todo
              :on-change [[:db/add self ::new-todo (-> % .-target .-value)]]}]
     [:button {:disabled (= "" new-todo)
-              :on-click [{:item/title new-todo :item/done false}
-                          ]}]]
+              :on-click [{:item/title new-todo :item/done false}]} "Add!"]]
    (ez/for {:db/id item [title done] :item/attrs}
-     :state {:db/id self2
+     :state {:db/id self
              [editing working-title] ::attrs
              {editing false
               working-title ""} :or}
      [:li
       [:input {:type :checkbox :checked done
                :on-change [[:db/add item :item/done (not done)]]}]
-      [:span {:on-click (when (not editing) [{:db/id self2 ::editing true ::working-title title}])} 
+      [:span {:on-click (when (not editing) [{:db/id self ::editing true ::working-title title}])}
        (ez/for [[(= editing false)]] title)
        (ez/for [[(= editing true)]]
          [:input {:value working-title
-                  :on-change [[:db/add self2 ::working-title (-> % .-target .-value)]]
-                  :on-blur [[:db/add self2 ::editing false]
+                  :on-change [[:db/add self ::working-title (-> % .-target .-value)]]
+                  :on-blur [[:db/add self ::editing false]
                             [:db/add item :item/title working-title]]}])]])])
 
 (defn show []

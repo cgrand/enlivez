@@ -53,13 +53,22 @@
   (let [x (if (map? x) [x] x)]
     (into [] (mapcat (fn [x] (if (map? x) (:clauses (expand-query-map x)) [x])) x))))
 
+(defn question-var [x]
+  (if (.startsWith (name x) "?")
+    x
+    (gensym (str "?" (name x)))))
+
 ;; keysets
-(defn implicit-vars [expanded-q] ; is this still needed? (except for _)
-  (into #{}
-    (filter #(and (symbol? %) (not= '_ %) #_(not (.startsWith (name %) "?"))))
+(defn fresh-vars [expanded-q known-vars]
+  (into {}
+    (keep 
+      (fn [x]
+        (when (and (symbol? x) (not ('#{_ $} x))
+                (or (:fresh (meta x)) (not (known-vars x))))
+          [x (question-var x )])))
     ; assumes there are no extra datasources, and that a var can't appear in function
     ; position
-    (tree-seq coll? (fn [x] (cond-> (seq x) (seq? x) next)) expanded-q)))
+    (tree-seq coll? #(if (seq? %) (next %) (seq %)) expanded-q)))
 
 (defn- dnf "Returns a disjunctive normal form of the clause" [clause]
   (cond
@@ -144,7 +153,7 @@
 
 (defn- keyset [conjunction schema known-vars]
   (let [succs (-> (deps conjunction schema)
-                (update :known (fnil into []) known-vars))
+                (update :known (fnil into []) (keys known-vars)))
         sccs (scc (keys succs) succs)
         scc-of (into {}
                  (clj/for [scc sccs, var scc]
@@ -161,12 +170,13 @@
   ; in presence of many cycles the key may not be minimal
   (into #{} (comp (mapcat #(keyset % schema known-vars)) (map first)) (dnf (cons 'and expanded-q))))
 
-(defn question-vars [x]
-  (cond
-    (seq? x) (cons (first x) (map question-vars (next x)))
-    (vector? x) (into [] (map question-vars) x)
-    (and (symbol? x) (not (#{'_ '$} x)) (not (.startsWith (name x) "?"))) (symbol (str "?" (name x)))
-    :else x))
+(defn apply-aliases [x known-vars]
+  (letfn [(walk [x]
+            (cond
+              (seq? x) (cons (first x) (map walk (next x)))
+              (vector? x) (into [] (map walk) x)
+              :else (known-vars x x)))]
+    (walk x)))
 
 ;; state
 
@@ -218,9 +228,8 @@
 
 (defn terminal [env known-vars expr]
   (let [args (used-vars expr known-vars)]
-    (prn 'TERM args expr)
     (fn [schema]
-      `(terminal-template '[~@(map question-vars args)] (fn [[~@args]] ~expr)))))
+      `(terminal-template '[~@(map #(apply-aliases % known-vars) args)] (fn [[~@args]] ~expr)))))
 
 (defn fragment* [env known-vars body]
   (let [[exprs body] (lift-expressions known-vars (vec body))
@@ -239,13 +248,14 @@
   ; TODO: init may have vars
   (let [{:keys [eid clauses]} (expand-query-map qmap)
         default-clauses (default-clauses init qmap)
-        vars (doto (conj (implicit-vars clauses) eid) (->> (prn 'VARS)))
-        eid (question-vars eid)
-        clauses (map question-vars clauses)
-        default-clauses (map question-vars default-clauses)
-        child (fragment* env (into known-vars vars) body)]
+        known-vars (into known-vars
+                     (assoc (fresh-vars clauses {}) ; empty known-vars because :state must not filter
+                       eid (question-var eid)))
+        clauses (map #(apply-aliases % known-vars) clauses) ; TODO
+        default-clauses (map #(apply-aliases % known-vars) default-clauses)
+        child (fragment* env known-vars body)]
     (fn [schema]
-      `(state-template '~init '(if-state ~eid ~clauses ~default-clauses) ~(child schema)))))
+      `(state-template '~init '(if-state ~(known-vars eid) ~clauses ~default-clauses) ~(child schema)))))
 
 (s/def ::fragment-body
   (s/cat
@@ -271,16 +281,19 @@
 
 (defn for [env known-vars q & body]
   (let [q (expand-query q)
-        vars (implicit-vars q)
-        ?q (question-vars q)
-        child (apply fragment env (into known-vars vars) body)]
+        vars (fresh-vars q known-vars)
+        known-vars' (into known-vars vars)
+        ?q (apply-aliases q known-vars')
+        child (apply fragment env known-vars' body)]
     (fn [schema]
-      (let [own-keys (map question-vars (keyvars q schema known-vars))]
+      (let [own-keys (map #(apply-aliases % known-vars') (keyvars q schema known-vars))] ; known-vars and not known-vars' because we care about vars that were previously known
         `(for-template '~?q '~own-keys
            ~(child schema))))))
 
 (defmacro deftemplate [name args & body]
-  (let [template (apply fragment &env (set args) body)
+  (let [template (apply fragment &env
+                   (into {} (clj/for [arg args] [arg (question-var arg)]))
+                   body)
         schema {}]
     `(def ~name ~(template schema))))
 
