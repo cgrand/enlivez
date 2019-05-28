@@ -8,6 +8,8 @@
 
 ; https://github.com/tonsky/datascript/wiki/Tips-&-tricks#editing-the-schema
 
+#_(def ^:private rules-registry (atom {}))
+
 ;; Datasource is only accessible through subscription
 (def ^:private ^:dynamic *reentrant* false)
 
@@ -133,6 +135,10 @@
   (let [[qks child] child]
     [(map #(cons [entity-q []] %) qks) #(state-component entity-map child %1 %2 %3)]))
 
+(defn include-template [clauses child]
+  (let [[qks child] child]
+    [(map #(cons [clauses nil] %) qks) child]))
+
 (declare ^::special for ^::special fragment ^::special terminal)
 
 (defn simplify [x]
@@ -146,7 +152,7 @@
   "Flattens a hierarchical query to a pair [actual-query f] where f
    is a function to map a row to a path."
   [hq]
-  (prn 'HQ hq)
+  #_(prn 'HQ hq)
   (let [[where find ks seg-fns]
         (reduce
           (fn [[where find ks seg-fns] [q k]]
@@ -159,15 +165,17 @@
                            (list* 'and (list 'not [eid ::key ?sk])
                              [(list 'vector ::key ?sk) eid] else))]) ; was 'vector but https://github.com/tonsky/datascript/issues/262
                       q)
-                  seg-fn (if (number? k)
-                           (constantly [k])
+                  seg-fn (cond
+                           (nil? k) nil
+                           (number? k) (constantly [k])
+                           :else
                            (let [from (count find)
                                  to (+ from (count k))]
                              #(into [] (subvec % from to))))] ; https://clojure.atlassian.net/browse/CLJS-3092
               [(into where q)
                (into find (if (number? k) nil k))
                (into ks (if (number? k) [k] k))
-               (conj seg-fns seg-fn)]))
+               (cond-> seg-fns seg-fn (conj seg-fn))]))
           [[] [] [] []] hq)]
     [`[:find ~@find :where ~@where]
      (fn [row] (into [] (map #(% row)) seg-fns))]))
@@ -198,7 +206,7 @@
             (reset! aprev-paths paths)
             (when (not= #{} delta)
               #_(prn 'Q q)
-              (prn 'DELTA delta)
+              #_(prn 'DELTA delta)
               (f delta)))))}]))
 
 (defn mount [template elt]

@@ -237,8 +237,24 @@
                    [paths (let [{:keys [meta name]}
                                 (when-some [x (and (seq? expr) (first expr))]
                                   (when (symbol? x) (some->> x (ana/resolve-var env))))]
-                            (if (::special meta)
+                            (cond 
+                              (::special meta)
                               (apply @(resolve name) env known-vars (next expr)) ; TODO inclusion
+                              (::template meta)
+                              (let [args (::template meta)
+                                    clauses
+                                    (map
+                                      (fn [e arg]
+                                        (cond
+                                          (known-vars e)
+                                          [(list 'identity (known-vars e)) arg]
+                                          (seq? e)
+                                          [(apply-aliases e known-vars) arg]
+                                          :else
+                                          [(list 'ground e) arg]))
+                                      (next expr) args)]
+                                (fn [schema] `(include-template '~clauses ~name)))
+                              :else
                               (terminal env known-vars expr)))])]
     (fn [schema]
       `(fragment-template ~body
@@ -291,13 +307,13 @@
            ~(child schema))))))
 
 (defmacro deftemplate [name args & body]
-  (let [template (apply fragment &env
-                   (into {} (clj/for [arg args] [arg (question-var arg)]))
-                   body)
+  (let [aliases (into {} (clj/for [arg args] [arg (question-var arg)]))
+        template (apply fragment &env aliases body)
         schema {}]
-    `(def ~name ~(template schema))))
+    `(def ~(vary-meta name assoc ::template (mapv aliases args)) #_~args ~(template schema))))
 
 #_(defmacro defrule [rulename args & clauses]
    (if (seq? args)
      `(do
-        ~@(map (fn [args+clauses] `(defrule ~rulename ~@args+clauses)) (cons args clauses)))))
+        ~@(map (fn [args+clauses] `(defrule ~rulename ~@args+clauses)) (cons args clauses)))
+     ))

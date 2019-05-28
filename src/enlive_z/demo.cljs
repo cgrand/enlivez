@@ -2,31 +2,35 @@
   (:require [enlive-z.core :as ez]
     [datascript.core :as d]))
 
+(ez/deftemplate new-item [self new-todo]
+  [:li
+    [:input {:value new-todo
+             :on-change (doto [[:db/add self ::new-todo (-> % .-target .-value)]] prn)}]
+    [:button {:disabled (= "" new-todo)
+              :on-click [{:item/title new-todo :item/done false}
+                         [:db/add self ::new-todo ""]]} "Add!"]])
+
 (ez/deftemplate todo []
   :init {::new-todo ""}
   :state {:db/id self
           [new-todo] ::attrs}
   [:ul
-   [:li
-    [:input {:value new-todo
-             :on-change [[:db/add self ::new-todo (-> % .-target .-value)]]}]
-    [:button {:disabled (= "" new-todo)
-              :on-click [{:item/title new-todo :item/done false}]} "Add!"]]
+   (new-item self new-todo)
    (ez/for {:db/id item [title done] :item/attrs}
-     :state {:db/id self
-             [editing working-title] ::attrs
-             {editing false
-              working-title ""} :or}
-     [:li
-      [:input {:type :checkbox :checked done
-               :on-change [[:db/add item :item/done (not done)]]}]
-      [:span {:on-click (when (not editing) [{:db/id self ::editing true ::working-title title}])}
-       (ez/for [[(= editing false)]] title)
-       (ez/for [[(= editing true)]]
-         [:input {:value working-title
-                  :on-change [[:db/add self ::working-title (-> % .-target .-value)]]
-                  :on-blur [[:db/add self ::editing false]
-                            [:db/add item :item/title working-title]]}])]])])
+    :state {:db/id self
+            [editing working-title] ::attrs
+            {editing false
+             working-title ""} :or}
+    [:li
+     [:input {:type :checkbox :checked done
+              :on-change [[:db/add item :item/done (not done)]]}]
+     [:span {:on-click (when (not editing) [{:db/id self ::editing true ::working-title title}])}
+      (ez/for [[(= editing false)]] title)
+      (ez/for [[(= editing true)]]
+        [:input {:value working-title
+                 :on-change [[:db/add self ::working-title (-> % .-target .-value)]]
+                 :on-blur [[:db/add self ::editing false]
+                           [:db/add item :item/title working-title]]}])]])])
 
 (defn show []
   (d/reset-conn! ez/conn (d/empty-db {:enlive-z.core/child {:db/valueType :db.type/ref
@@ -36,3 +40,9 @@
   (ez/mount todo (.-body js/document))
   (:tx-data (d/transact! ez/conn [{:item/title "something" :item/done false}
                                   {:item/title "something else" :item/done false}])))
+
+
+
+
+
+
