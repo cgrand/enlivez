@@ -47,28 +47,51 @@
 (defn for-component [child ump! parent-state-eid flat-ks]
   (let [children (atom {})
         ordered-ks (atom [])
-        doms (atom {})]
+        doms (atom {})
+        delete-child
+        (fn [k]
+          (swap! ordered-ks #(vec (remove #{k} %)))
+          (swap! children dissoc k)
+          (swap! doms dissoc k)
+          (ump! (map @doms @ordered-ks)))
+        child-component
+        (fn [child-k child]
+          (reify
+            ILookup
+            (-lookup [c k]
+              (let [[dir] k]
+                (case dir
+                  0 nil ; todo
+                  1 child)))
+            Component
+            (ensure! [c ks]
+              (let [[dir] (peek ks)]
+                (case dir
+                  0 nil ; todo
+                  1 child)))
+            (delete! [c k] 
+              (let [[dir] k]
+                (case dir
+                  0 (delete-child child-k) ; it may seem backward but it's ok; sort key doubles as sentinel
+                  1 nil)))))]
     (reify 
       ILookup
-      (-lookup [c k] (@children k))
+      (-lookup [c k]
+        (some->> (@children k) (child-component k)))
       Component
       (ensure! [c ks]
         (let [k (peek ks)]
-          (or (@children k)
-            (let [child (child
-                          #(let [doms (swap! doms assoc k %)]
-                             (ump! (map doms @ordered-ks)))
-                          parent-state-eid (into flat-ks k))]
-              (swap! ordered-ks conj k)
-              (swap! children assoc k child)
-              (ump! (map @doms @ordered-ks))
-              child))))
-      (delete! [c k]
-        (swap! ordered-ks #(vec (remove #{k} %)))
-        (swap! children dissoc k)
-        (swap! doms dissoc k)
-        (ump! (map @doms @ordered-ks))
-        nil))))
+          (child-component k
+            (or (@children k)
+              (let [child (child
+                            #(let [doms (swap! doms assoc k %)]
+                               (ump! (map doms @ordered-ks)))
+                            parent-state-eid (conj (into flat-ks k) 1))]
+                (swap! ordered-ks conj k)
+                (swap! children assoc k child)
+                (ump! (map @doms @ordered-ks))
+                child)))))
+      (delete! [c k] (delete-child k)))))
 
 (defn fragment-component [dom children ump! parent-state-eid flat-ks]
   (let [adom (atom dom)
@@ -115,9 +138,10 @@
             (d/transact! conn [[:db/retract parent-state-eid ::child state-eid]
                                [:db/retractEntity state-eid]]))) ))))
 
-(defn for-template [q ks child]
+(defn for-template [q ks sort-ks child]
   (let [[qks child] child
-        qks (map #(cons [q ks] %) (cons [[[] []]] qks))] ; [[] []] is to help detect upserts
+        qks (cons (list [q ks] [[] 0] [[] sort-ks])
+              (map #(list* [q ks] [[] 1] %) qks))]
     [qks #(for-component child %1 %2 %3)]))
 
 (defn fragment-template [body children]

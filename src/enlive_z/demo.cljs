@@ -2,7 +2,10 @@
   (:require [enlive-z.core :as ez]
     [datascript.core :as d]))
 
-(ez/deftemplate new-item [self new-todo]
+(ez/deftemplate new-item [#_#_self new-todo]
+  :init {::new-todo ""}
+  :state {:db/id self
+          [new-todo] ::attrs}
   [:li
     [:input {:value new-todo
              :on-change (doto [[:db/add self ::new-todo (-> % .-target .-value)]] prn)}]
@@ -11,11 +14,8 @@
                          [:db/add self ::new-todo ""]]} "Add!"]])
 
 (ez/deftemplate todo []
-  :init {::new-todo ""}
-  :state {:db/id self
-          [new-todo] ::attrs}
   [:ul
-   (new-item self new-todo)
+   (new-item #_#_ self new-todo)
    (ez/for {:db/id item [title done] :item/attrs}
     :state {:db/id self
             [editing working-title] ::attrs

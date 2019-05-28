@@ -273,11 +273,6 @@
     (fn [schema]
       `(state-template '~init '(if-state ~(known-vars eid) ~clauses ~default-clauses) ~(child schema)))))
 
-(s/def ::fragment-body
-  (s/cat
-    :options (s/* (s/cat :key keyword? :value any?))
-    :body (s/* any?)))
-
 (defmacro ^:private if-valid
   ([bindings+spec+value then] `(if-valid ~bindings+spec+value ~then nil))
   ([[bindings spec value] then else]
@@ -287,6 +282,11 @@
          (let [~bindings conformed#]
            ~then)))))
 
+(s/def ::fragment-body
+  (s/cat
+    :options (s/* (s/cat :key keyword? :value any?))
+    :body (s/* any?)))
+
 (defn fragment [env known-vars & body]
   (if-valid [{:keys [body options]} ::fragment-body body]
     (let [{:keys [init] qmap :state} (into {} (map (juxt :key :value)) options)]
@@ -295,16 +295,31 @@
         (fragment* env known-vars body)))
     (throw (ex-info "Invalid body" {:body body}))))
 
+(s/def ::for-body
+  (s/cat
+    :options (s/* (s/cat :key keyword? :value any?))
+    :body (s/* any?)))
+
 (defn for [env known-vars q & body]
-  (let [q (expand-query q)
-        vars (fresh-vars q known-vars)
-        known-vars' (into known-vars vars)
-        ?q (apply-aliases q known-vars')
-        child (apply fragment env known-vars' body)]
-    (fn [schema]
-      (let [own-keys (map #(apply-aliases % known-vars') (keyvars q schema known-vars))] ; known-vars and not known-vars' because we care about vars that were previously known
-        `(for-template '~?q '~own-keys
-           ~(child schema))))))
+  (if-valid [{:keys [body options]} ::fragment-body body]
+    (let [sort-key (some (fn [{:keys [key value]}]
+                          (when (= key :sort) value)) options)
+          body (concat
+                 (mapcat (fn [{:keys [key value]}]
+                           (when-not (= key :sort) [key value]))
+                   options)
+                 body)
+          q (expand-query q)
+          vars (fresh-vars q known-vars)
+          known-vars' (into known-vars vars)
+          ?q (apply-aliases q known-vars')
+          child (apply fragment env known-vars' body)]
+      (fn [schema]
+        (let [own-keys (map #(apply-aliases % known-vars') (keyvars q schema known-vars))
+              sort-key (or (map #(apply-aliases % known-vars') sort-key) own-keys)] ; known-vars and not known-vars' because we care about vars that were previously known
+          `(for-template '~?q '~own-keys '~sort-key
+             ~(child schema)))))
+    (throw (ex-info "Invalid body" {:body body}))))
 
 (defmacro deftemplate [name args & body]
   (let [aliases (into {} (clj/for [arg args] [arg (question-var arg)]))
