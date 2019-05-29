@@ -316,7 +316,7 @@
           child (apply fragment env known-vars' body)]
       (fn [schema]
         (let [own-keys (map #(apply-aliases % known-vars') (keyvars q schema known-vars))
-              sort-key (or (map #(apply-aliases % known-vars') sort-key) own-keys)] ; known-vars and not known-vars' because we care about vars that were previously known
+              sort-key (if sort-key (map #(apply-aliases % known-vars') sort-key) own-keys)] ; known-vars and not known-vars' because we care about vars that were previously known
           `(for-template '~?q '~own-keys '~sort-key
              ~(child schema)))))
     (throw (ex-info "Invalid body" {:body body}))))

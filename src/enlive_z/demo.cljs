@@ -21,6 +21,7 @@
             [editing working-title] ::attrs
             {editing false
              working-title ""} :or}
+    :sort [done title]
     [:li
      [:input {:type :checkbox :checked done
               :on-change [[:db/add item :item/done (not done)]]}]

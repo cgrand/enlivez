@@ -46,14 +46,17 @@
 
 (defn for-component [child ump! parent-state-eid flat-ks]
   (let [children (atom {})
-        ordered-ks (atom [])
+        sort-ks (atom {})
+        ordered-ks (atom (sorted-set))
         doms (atom {})
         delete-child
         (fn [k]
-          (swap! ordered-ks #(vec (remove #{k} %)))
-          (swap! children dissoc k)
-          (swap! doms dissoc k)
-          (ump! (map @doms @ordered-ks)))
+          (let [sort-k (@sort-ks k)
+                ord (swap! ordered-ks disj [sort-k k])]
+            (swap! sort-ks dissoc k)
+            (swap! children dissoc k)
+            (swap! doms dissoc k)
+            (ump! (map (comp @doms second) ord))))
         child-component
         (fn [child-k child]
           (reify
@@ -61,13 +64,23 @@
             (-lookup [c k]
               (let [[dir] k]
                 (case dir
-                  0 nil ; todo
+                  0 nil
                   1 child)))
             Component
             (ensure! [c ks]
               (let [[dir] (peek ks)]
                 (case dir
-                  0 nil ; todo
+                  0 (reify Component
+                      (ensure! [c ks]
+                        (let [sort-k (peek ks)
+                              prev-sort-k (@sort-ks child-k)
+                              ord (swap! ordered-ks
+                                    #(-> %
+                                       (disj [prev-sort-k child-k])
+                                       (conj [sort-k child-k])))]
+                          (swap! sort-ks assoc child-k sort-k)
+                          (ump! (map (comp @doms second) ord)))
+                        nil))
                   1 child)))
             (delete! [c k] 
               (let [[dir] k]
@@ -85,11 +98,11 @@
             (or (@children k)
               (let [child (child
                             #(let [doms (swap! doms assoc k %)]
-                               (ump! (map doms @ordered-ks)))
+                               (ump! (map (comp doms second) @ordered-ks)))
                             parent-state-eid (conj (into flat-ks k) 1))]
-                (swap! ordered-ks conj k)
+                #_(swap! ordered-ks conj k)
                 (swap! children assoc k child)
-                (ump! (map @doms @ordered-ks))
+                #_(ump! (map (comp @doms second) @ordered-ks))
                 child)))))
       (delete! [c k] (delete-child k)))))
 
@@ -130,7 +143,8 @@
       ILookup
       (-lookup [c k] (-lookup child k))
       Component
-      (ensure! [c ks] (ensure! child ks))
+      (ensure! [c ks]
+        (ensure! child ks))
       (delete! [c k]
         (try
           (delete! child k)
@@ -157,7 +171,7 @@
 
 (defn state-template [entity-map entity-q child]
   (let [[qks child] child]
-    [(map #(cons [entity-q []] %) qks) #(state-component entity-map child %1 %2 %3)]))
+    [(map #(cons [entity-q nil] %) qks) #(state-component entity-map child %1 %2 %3)]))
 
 (defn include-template [clauses child]
   (let [[qks child] child]
@@ -224,13 +238,13 @@
                         (into (map #(conj % false)) (keys deletions))
                         (into
                           (comp
-                            (map #(if (= [] (peek %)) (pop %) %))
+                            #_(map #(if (= [] (peek %)) (pop %) %))
                             (map #(conj % true)))
                           (vals upserts)))]
             (reset! aprev-paths paths)
             (when (not= #{} delta)
               #_(prn 'Q q)
-              #_(prn 'DELTA delta)
+              (prn 'DELTA delta)
               (f delta)))))}]))
 
 (defn mount [template elt]
