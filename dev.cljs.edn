@@ -1,0 +1,6 @@
+^{:auto-testing true
+  :open-url false}
+{:optimizations :none
+ ; :checked-arrays :warn
+ :closure-defines {"goog.DEBUG" true}
+ :parallel-build true}

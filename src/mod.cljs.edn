@@ -1,0 +1,2 @@
+^{:watch-dirs ["src"]}
+{#_#_:main tnt.main}
