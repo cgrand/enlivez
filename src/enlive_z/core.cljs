@@ -27,8 +27,6 @@
 
 (defn txing-handler [f]
   (fn [e]
-    #_(.preventDefault e) ; TODO: make it possible to opt out
-    #_(.stopPropagation e) ; TODO: make it possible to opt out
     (this-as this
       (when-some [tx (.call f this e)]
         (d/transact! conn (if (map? tx) [tx] tx))))))
@@ -218,9 +216,17 @@
     [`[:find ~@find :where ~@where]
      (fn [row] (into [] (map #(% row)) seg-fns))]))
 
-(defn- subscription
-  "Returns transaction.
-   Upon subscription f receives a (positive only) delta representing the current state."
+(defn subscription
+  "Returns transaction data.
+   hq is a hierarchical query, that is a collection of pairs [q k]  where q is
+   a sequence of datascript clauses and k is a collection of variables.
+   A hierarchical query behaves likes the conjuctions of its queries and returns,
+   for each tuple of the result set, a path. Each segment of this path correspond
+   to the instanciation of the k components of hq.
+   f is a functions that receives changes, when the db change, to hq result paths.
+   This changes are represented by a set of vectors, each vector being a path with
+   an additional top item: a boolean, true for addition, false for deletion.
+   Upon transaction of the subscription, f receives a first delta (positive only) representing the current state."
   [hq f]
   (let [[q path-fn] (flatten-q hq)]
     [{::live-query q
