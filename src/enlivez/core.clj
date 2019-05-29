@@ -1,4 +1,4 @@
-(ns enlive-z.core
+(ns enlivez.core
   (:refer-clojure :exclude [for])
   (:require [clojure.core :as clj]
     [cljs.analyzer :as ana]

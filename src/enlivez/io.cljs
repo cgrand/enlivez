@@ -1,5 +1,5 @@
-(ns enlive-z.io
-  (:require [enlive-z.core :as ez]
+(ns enlivez.io
+  (:require [enlivez.core :as ez]
     [datascript.core :as d]))
 
 (defn to-ws

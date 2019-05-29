@@ -1,5 +1,5 @@
-(ns enlive-z.core
-  (:require-macros enlive-z.core)
+(ns enlivez.core
+  (:require-macros enlivez.core)
   (:refer-clojure :exclude [for])
   (:require
     [clojure.core :as clj]

@@ -1,5 +1,5 @@
-(ns enlive-z.demo
-  (:require [enlive-z.core :as ez]
+(ns enlivez.demo
+  (:require [enlivez.core :as ez]
     [datascript.core :as d]))
 
 (ez/deftemplate new-item [#_#_self new-todo]
