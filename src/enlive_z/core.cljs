@@ -13,7 +13,7 @@
 ;; Datasource is only accessible through subscription
 (def ^:private ^:dynamic *reentrant* false)
 
-(def conn
+(def ^:private conn
   (doto (d/create-conn {::child {:db/valueType :db.type/ref
                                  :db/isComponent true
                                  :db/cardinality :db.cardinality/many}

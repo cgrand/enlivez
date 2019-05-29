@@ -34,13 +34,11 @@
                            [:db/add item :item/title working-title]]}])]])])
 
 (defn show []
-  (d/reset-conn! ez/conn (d/empty-db {:enlive-z.core/child {:db/valueType :db.type/ref
-                                                            :db/isComponent true
-                                                            :db/cardinality :db.cardinality/many}
-                                      :enlive-z.core/key {:db/unique :db.unique/identity}}))
-  (ez/mount todo (.-body js/document))
-  (:tx-data (d/transact! ez/conn [{:item/title "something" :item/done false}
-                                  {:item/title "something else" :item/done false}])))
+  (let [conn @#'ez/conn]
+    (d/reset-conn! conn (d/empty-db (:schema @conn)))
+    (ez/mount todo (.-body js/document))
+    (:tx-data (d/transact! conn [{:item/title "something" :item/done false}
+                                 {:item/title "something else" :item/done false}]))))
 
 
 
