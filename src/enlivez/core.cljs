@@ -212,7 +212,12 @@
                (into find (if (number? k) nil k))
                (into ks (if (number? k) [k] k))
                (cond-> seg-fns seg-fn (conj seg-fn))]))
-          [[] [] [] []] hq)]
+          [[] [] [] []] hq)
+        [find where]
+        (if (seq find)
+          [find where]
+          (let [v (gensym "?true")]
+            [[v] (into [[(list 'ground true) v]] where)]))]
     [`[:find ~@find :where ~@where]
      (fn [row] (into [] (map #(% row)) seg-fns))]))
 
