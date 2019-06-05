@@ -253,6 +253,10 @@
                                           :else
                                           [(list 'ground e) arg]))
                                       (next expr) args)]
+                                (when-not (= (count args) (count (next expr)))
+                                  (throw (ex-info (str "Arity mismatch: " (first expr) " got " (count (next expr)) " arguments.")
+                                           {:expr expr
+                                            :expected args})))
                                 (fn [schema] `(include-template '~clauses ~name)))
                               :else
                               (terminal env known-vars expr)))])]
