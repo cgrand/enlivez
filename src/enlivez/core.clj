@@ -33,21 +33,24 @@
         eid (:db/id qmap (gensym '?id))
         qmap (dissoc qmap :db/id)]
     {:eid eid
-     :clauses (vec
-                (clj/for [[k v] qmap]
+     :clauses (into []
+                (mapcat (fn [[k v]]
                   ; PONDER: outputting recursive clauses after all non-rec
                   (if (map? v) ; recursive expansion
                     (let [{:keys [clauses], attr-eid :eid} (expand-query-map v)]
                       (cons
                         (if-some [k (reverse-lookup k)]
                           [attr-eid k eid]
-                          [eid k attr-eid])
+                          (if-some [[_ default] (find defaults attr-eid)]
+                            [(list 'get-else '$ eid k default) attr-eid]
+                            [eid k attr-eid]))
                         clauses))
-                    (if-some [k (reverse-lookup k)]
-                        [v k eid]
-                        (if-some [[_ default] (find defaults v)]
-                          [(list 'get-else '$ eid k default) v]
-                          [eid k v])))))}))
+                    [(if-some [k (reverse-lookup k)]
+                       [v k eid]
+                       (if-some [[_ default] (find defaults v)]
+                         [(list 'get-else '$ eid k default) v]
+                         [eid k v]))])))
+                 qmap)}))
 
 (defn expand-query [x]
   (let [x (if (map? x) [x] x)]
@@ -137,9 +140,9 @@
                           (symbol? v)
                           (when (= :db.cardinality/one (get-in schema [a :db/cardinality] :db.cardinality/one))
                             [[e v]])
-                
+
                           (get-in schema [a :db/unique]) [[:known v]])
-              
+
                         (seq? e)
                         (case (first e)
                           get-else (let [v a
