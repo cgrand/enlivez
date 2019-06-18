@@ -4,6 +4,10 @@
     [cljs.analyzer :as ana]
     [clojure.spec.alpha :as s]))
 
+(defprotocol Template
+  (get-schema [_])
+  (emit-cljs [_ schema]))
+
 ;; query maps syntax
 (defn- reverse-lookup
   "Returns the direct keyword when the input keyord is reversed, else returns nil."
@@ -231,10 +235,12 @@
 
 (defn terminal [env known-vars expr]
   (let [args (used-vars expr known-vars)]
-    (fn [schema]
-      `(terminal-template '[~@(map #(apply-aliases % known-vars) args)] (fn [[~@args]] ~expr)))))
+    (reify Template
+      (get-schema [_] nil)
+      (emit-cljs [_ schema]
+        `(terminal-template '[~@(map #(apply-aliases % known-vars) args)] (fn [[~@args]] ~expr))))))
 
-(defn fragment* [env known-vars body]
+(defn fragment* [env known-vars body options]
   (let [[exprs body] (lift-expressions known-vars (vec body))
         children (clj/for [[paths expr] exprs]
                    [paths (let [{:keys [meta name]}
@@ -260,14 +266,18 @@
                                   (throw (ex-info (str "Arity mismatch: " (first expr) " got " (count (next expr)) " arguments.")
                                            {:expr expr
                                             :expected args})))
-                                (fn [schema] `(include-template '~clauses ~name)))
+                                (reify Template
+                                  (get-schema [_] (::schema meta))
+                                  (emit-cljs [_ schema] `(include-template '~clauses ~name))))
                               :else
                               (terminal env known-vars expr)))])]
-    (fn [schema]
-      `(fragment-template ~body
-         [~@(clj/for [[path child] children] [`'~path (child schema)])]))))
+    (reify Template
+      (get-schema [_] (transduce (map (comp get-schema second)) (partial merge-with into) (:schema options {}) children))
+      (emit-cljs [_ schema]
+        `(fragment-template ~body
+           [~@(clj/for [[path child] children] [`'~path (emit-cljs child schema)])])))))
 
-(defn state [env known-vars init qmap body]
+(defn state [env known-vars init qmap body options]
   ; TODO: init may have vars
   (let [{:keys [eid clauses]} (expand-query-map qmap)
         default-clauses (default-clauses init qmap)
@@ -276,9 +286,11 @@
                        eid (question-var eid)))
         clauses (map #(apply-aliases % known-vars) clauses) ; TODO
         default-clauses (map #(apply-aliases % known-vars) default-clauses)
-        child (fragment* env known-vars body)]
-    (fn [schema]
-      `(state-template '~init '(if-state ~(known-vars eid) ~clauses ~default-clauses) ~(child schema)))))
+        child (fragment* env known-vars body options)]
+    (reify Template
+      (get-schema [_] (get-schema child))
+      (emit-cljs [_ schema]
+        `(state-template '~init '(if-state ~(known-vars eid) ~clauses ~default-clauses) ~(emit-cljs child schema))))))
 
 (defmacro ^:private if-valid
   ([bindings+spec+value then] `(if-valid ~bindings+spec+value ~then nil))
@@ -298,8 +310,8 @@
   (if-valid [{:keys [body options]} ::fragment-body body]
     (let [{:keys [init] qmap :state} (into {} (map (juxt :key :value)) options)]
       (if qmap
-        (state env known-vars (or init {}) qmap body)
-        (fragment* env known-vars body)))
+        (state env known-vars (or init {}) qmap body options)
+        (fragment* env known-vars body options)))
     (throw (ex-info "Invalid body" {:body body}))))
 
 (s/def ::for-body
@@ -321,18 +333,21 @@
           known-vars' (into known-vars vars)
           ?q (apply-aliases q known-vars')
           child (apply fragment env known-vars' body)]
-      (fn [schema]
-        (let [own-keys (map #(apply-aliases % known-vars') (keyvars q schema known-vars))
-              sort-key (if sort-key (map #(apply-aliases % known-vars') sort-key) own-keys)] ; known-vars and not known-vars' because we care about vars that were previously known
-          `(for-template '~?q '~own-keys '~sort-key
-             ~(child schema)))))
+      (reify Template
+        (get-schema [_] (get-schema child))
+        (emit-cljs [_ schema]
+          (let [own-keys (map #(apply-aliases % known-vars') (keyvars q schema known-vars))
+                sort-key (if sort-key (map #(apply-aliases % known-vars') sort-key) own-keys)] ; known-vars and not known-vars' because we care about vars that were previously known
+            `(for-template '~?q '~own-keys '~sort-key
+               ~(emit-cljs child schema))))))
     (throw (ex-info "Invalid body" {:body body}))))
 
 (defmacro deftemplate [name args & body]
   (let [aliases (into {} (clj/for [arg args] [arg (question-var arg)]))
         template (apply fragment &env aliases body)
-        schema {}]
-    `(def ~(vary-meta name assoc ::template (mapv aliases args)) #_~args ~(template schema))))
+        schema (get-schema template)]
+    `(def ~(vary-meta name assoc ::template (mapv aliases args) ::schema schema)
+       ~(emit-cljs template schema))))
 
 #_(defmacro defrule [rulename args & clauses]
    (if (seq? args)

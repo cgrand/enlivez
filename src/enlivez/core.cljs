@@ -271,5 +271,5 @@
                     (f component path)))
         subscriptions (vec (mapcat #(subscription % update!) qks))]
     (d/transact! conn subscriptions)
-    (r/render [#(first (simplify @dom))] elt)))
+    (r/render [#(first (simplify (doto @dom prn)))] elt)))
 
