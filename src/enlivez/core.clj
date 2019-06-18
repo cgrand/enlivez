@@ -134,20 +134,18 @@
                     ; emit nothing on not: imagine (not [?a :ident/attr :k])
                     not nil)
                   ; else must be a vector
-                  (let [[e a v] (into clause '[_ _ _])
-                        e (cond-> e (= '_ e) gensym)
-                        v (cond-> v (= '_ v) gensym)]
+                  (let [[e a v] (into clause '[_ _ _])]
                     (when-not (symbol? a)
                       (cond
+                        (= '_ e) (when-not (= '_ v) [[v v]])
+                        (= '_ v) [[e e]]
                         (symbol? e)
                         (cond
                           (symbol? v)
                           (if (= :db.cardinality/one (get-in schema [a :db/cardinality] :db.cardinality/one))
                             [[e v]]
                             [[v v]]) ; self reference or else it may become unreachable
-
                           (get-in schema [a :db/unique]) [[:known e]])
-
                         (seq? e)
                         (case (first e)
                           get-else (let [v a
