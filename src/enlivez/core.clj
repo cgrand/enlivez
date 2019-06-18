@@ -142,10 +142,11 @@
                         (symbol? e)
                         (cond
                           (symbol? v)
-                          (when (= :db.cardinality/one (get-in schema [a :db/cardinality] :db.cardinality/one))
-                            [[e v]])
+                          (if (= :db.cardinality/one (get-in schema [a :db/cardinality] :db.cardinality/one))
+                            [[e v]]
+                            [[v v]]) ; self reference or else it may become unreachable
 
-                          (get-in schema [a :db/unique]) [[:known v]])
+                          (get-in schema [a :db/unique]) [[:known e]])
 
                         (seq? e)
                         (case (first e)
@@ -308,7 +309,7 @@
 
 (defn fragment [env known-vars & body]
   (if-valid [{:keys [body options]} ::fragment-body body]
-    (let [{:keys [init] qmap :state} (into {} (map (juxt :key :value)) options)]
+    (let [{:keys [init] qmap :state :as options} (into {} (map (juxt :key :value)) options)]
       (if qmap
         (state env known-vars (or init {}) qmap body options)
         (fragment* env known-vars body options)))
@@ -347,7 +348,7 @@
         template (apply fragment &env aliases body)
         schema (get-schema template)]
     `(def ~(vary-meta name assoc ::template (mapv aliases args) ::schema schema)
-       ~(emit-cljs template schema))))
+      ~(emit-cljs template schema))))
 
 #_(defmacro defrule [rulename args & clauses]
    (if (seq? args)
