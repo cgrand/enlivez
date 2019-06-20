@@ -236,23 +236,26 @@
   (let [[q path-fn] (flatten-q hq)]
     [{::live-query q
       ::handler
-      (let [aprev-paths (atom {})]
+      (let [aprev-rows (atom #{})]
         (fn [rows]
-          (let [prev-paths @aprev-paths
+          (let [prev-rows @aprev-rows
                 ; I could also use a flat sorted map with the right order
-                paths (into {} (comp (map path-fn) (map (fn [path] [(pop path) path]))) rows)
-                deletions (reduce dissoc prev-paths (keys paths))
-                upserts  (into {}
-                           (remove (fn [[ks path]] (= path (prev-paths ks))))
-                           paths)
-                delta (-> #{}
-                        (into (map #(conj % false)) (keys deletions))
-                        (into
-                          (comp
-                            #_(map #(if (= [] (peek %)) (pop %) %))
-                            (map #(conj % true)))
-                          (vals upserts)))]
-            (reset! aprev-paths paths)
+                paths+ (into {}
+                         (comp
+                           (remove prev-rows)
+                           (map path-fn)
+                           (map (fn [path] [(pop path) path])))
+                         rows)
+                paths- (into #{}
+                         (comp
+                         (remove rows)
+                           (map path-fn)
+                           (keep (fn [path]
+                                   (let [k (pop path)]
+                                     (when-not (contains? paths+ k) (conj k false))))))
+                         prev-rows)
+                delta (into paths- (map (fn [[_ path]] (conj path true))) paths+)]
+            (reset! aprev-rows rows)
             (when (not= #{} delta)
               #_(prn 'Q q)
               (prn 'DELTA delta)
