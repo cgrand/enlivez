@@ -10,7 +10,7 @@ Like in pattern matching (and unlike destructuring), keys are in key position: `
 Like with destructuring, one can use `:attrs` (think `:keys`) and `:or` (and don't forget key val order is inverted):
 
 ```clj
-{[first-name lass-name] :attrs}
+{[first-name last-name] :attrs}
 ; is equivalent to
  {:first-name first-name :last-name last-name}
 
@@ -25,6 +25,7 @@ Like with destructuring, one can use `:attrs` (think `:keys`) and `:or` (and don
 {[first last] :name/keys
  {first "John" last "Does"} :or}
 ```
+Note that `:attrs` must not be used recursively.
 
 There's no `:as` because only entities can patterned, so if you want a reference to the entity just match its `:db/id` attribute!
 
