@@ -195,13 +195,11 @@
         (reduce
           (fn [[where find ks seg-fns] [q k]]
             (let [q (if (= `if-state (first q))
-                      (let [[_ eid then else] q
-                            ?sk (gensym '?sk)]
+                      (let [[_ ?sk eid then else] q]
                         [[(cons 'vector ks) ?sk]
-                         (list 'or
-                           (list* 'and [eid ::key ?sk] then)
-                           (list* 'and (list 'not ['_ ::key ?sk])
-                             [(list 'vector ::key ?sk) eid] else))])
+                         (list 'if [eid ::key ?sk]
+                           (cons 'and then)
+                           (list* 'and [(list 'vector ::key ?sk) eid] else))])
                       q)
                   seg-fn (cond
                            (nil? k) nil
@@ -219,7 +217,7 @@
         (if (seq find)
           [find where]
           (let [v (gensym "?true")]
-            [[v] (into [[(list 'ground true) v]] where)]))]
+            [[v] (into [(list '= true v)] where)]))]
     [find where
      (fn [row] (into [] (map #(% row)) seg-fns))]))
 

@@ -34,7 +34,7 @@
   ; may more easily drift away.
   [qmap]
   (let [{:keys [defaults qmap]} (unsugar-query-map qmap)
-        eid (:db/id qmap (gensym '?id))
+        eid (:db/id qmap (gensym 'id))
         qmap (dissoc qmap :db/id)]
     {:eid eid
      :clauses (into []
@@ -60,11 +60,6 @@
   (let [x (if (map? x) [x] x)]
     (into [] (mapcat (fn [x] (if (map? x) (:clauses (expand-query-map x)) [x])) x))))
 
-(defn question-var [x]
-  (if (.startsWith (name x) "?")
-    x
-    (gensym (str "?" (name x)))))
-
 ;; keysets
 (defn fresh-vars [expanded-q known-vars]
   (into {}
@@ -72,7 +67,7 @@
       (fn [x]
         (when (and (symbol? x) (not ('#{_ $} x))
                 (or (:fresh (meta x)) (not (known-vars x))))
-          [x (question-var x )])))
+          [x (gensym x)])))
     ; assumes there are no extra datasources, and that a var can't appear in function
     ; position
     (tree-seq coll? #(if (seq? %) (next %) (seq %)) expanded-q)))
@@ -193,11 +188,7 @@
     ; support for recursive inits needs to be added on the transacting side upon instantiation too
     (clj/for [[k v] qmap]
       (if-some [v' (init k (defaults v))]
-        (case [(symbol? v) (symbol? v')]
-          [true true] [(list '= v v')]
-          [true false] [(list 'ground v') v]
-          [false true] [(list 'ground v) v']
-          [(list '= v v')])
+        (list '= v v')
         (throw (ex-info (str "Init state can't satisfy state query; no default for " k) {:key k :init init :qmap qmap}))))))
 
 ;; hiccup-style template
@@ -253,13 +244,9 @@
                                     clauses
                                     (map
                                       (fn [e arg]
-                                        (cond
-                                          (known-vars e)
-                                          [(list 'identity (known-vars e)) arg]
-                                          (seq? e)
+                                        (if (seq? e)
                                           [(apply-aliases e known-vars) arg]
-                                          :else
-                                          [(list 'ground e) arg]))
+                                          (list '= (known-vars e e) arg)))
                                       (next expr) args)]
                                 (when-not (= (count args) (count (next expr)))
                                   (throw (ex-info (str "Arity mismatch: " (first expr) " got " (count (next expr)) " arguments.")
@@ -282,14 +269,14 @@
         default-clauses (default-clauses init qmap)
         known-vars (into known-vars
                      (assoc (fresh-vars clauses {}) ; empty known-vars because :state must not filter
-                       eid (question-var eid)))
+                       eid (gensym eid)))
         clauses (map #(apply-aliases % known-vars) clauses) ; TODO
         default-clauses (map #(apply-aliases % known-vars) default-clauses)
         child (fragment* env known-vars body options)]
     (reify Template
       (get-schema [_] (get-schema child))
       (emit-cljs [_ schema]
-        `(state-template '~init '(if-state ~(known-vars eid) ~clauses ~default-clauses) ~(emit-cljs child schema))))))
+        `(state-template '~init '(if-state ~(gensym "sk") ~(known-vars eid) ~clauses ~default-clauses) ~(emit-cljs child schema))))))
 
 (defmacro ^:private if-valid
   ([bindings+spec+value then] `(if-valid ~bindings+spec+value ~then nil))
@@ -342,7 +329,7 @@
     (throw (ex-info "Invalid body" {:body body}))))
 
 (defmacro deftemplate [name args & body]
-  (let [aliases (into {} (clj/for [arg args] [arg (question-var arg)]))
+  (let [aliases (into {} (clj/for [arg args] [arg (gensym arg)]))
         template (apply fragment &env aliases body)
         schema (get-schema template)]
     `(def ~(vary-meta name assoc ::template (mapv aliases args) ::schema schema)
