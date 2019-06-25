@@ -338,7 +338,7 @@
           (let [own-keys (map #(apply-aliases % known-vars') (keyvars q schema known-vars))
                 sort-key (if sort-key (map #(apply-aliases % known-vars') sort-key) own-keys)] ; known-vars and not known-vars' because we care about vars that were previously known
             `(for-template '~?q '~own-keys '~sort-key
-               ~(emit-cljs child schema))))))
+              ~(emit-cljs child schema))))))
     (throw (ex-info "Invalid body" {:body body}))))
 
 (defmacro deftemplate [name args & body]
@@ -346,7 +346,7 @@
         template (apply fragment &env aliases body)
         schema (get-schema template)]
     `(def ~(vary-meta name assoc ::template (mapv aliases args) ::schema schema)
-      ~(emit-cljs template schema))))
+       ~(emit-cljs template schema))))
 
 #_(defmacro defrule [rulename args & clauses]
    (if (seq? args)

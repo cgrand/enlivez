@@ -14,4 +14,10 @@
    :main-opts ["-m" "figwheel.main"
                ; "--compile-opts" "dev.cljs.edn:@mod.cljs.edn"
                ; "--compile"
-               "--repl"]}}}
+               "--repl"]}
+  
+  :bench
+   {:main-opts ["-m" "cljs.main"
+               "--compile-opts" "bench.cljs.edn"
+               "--compile"]}}
+}

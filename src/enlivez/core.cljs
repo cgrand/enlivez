@@ -4,6 +4,7 @@
   (:require
     [clojure.core :as clj]
     [datascript.core :as d]
+    [enlivez.q :as q]
     [reagent.core :as r]))
 
 ; https://github.com/tonsky/datascript/wiki/Tips-&-tricks#editing-the-schema
@@ -22,8 +23,9 @@
       (fn [{:keys [tx-data db-after]}]
         (when-not *reentrant*
           (binding [*reentrant* true]
-           (doseq [[eid q f] (d/q '[:find ?eid ?q ?f :where [?eid ::live-query ?q] [?eid ::handler ?f]] db-after)]
-             (f (d/q q db-after)))))))))
+           (doseq [[eid q f pq] (d/q '[:find ?eid ?q ?f ?pq :where [?eid ::live-query ?q] [?eid ::prepared-live-query ?pq] [?eid ::handler ?f]] db-after)]
+             #_(prn 'RUNNING q)
+             (f (pq db-after)))))))))
 
 (defn txing-handler [f]
   (fn [e]
@@ -188,18 +190,18 @@
   "Flattens a hierarchical query to a pair [actual-query f] where f
    is a function to map a row to a path."
   [hq]
-  #_(prn 'HQ hq)
+  (prn 'HQ hq)
   (let [[where find ks seg-fns]
         (reduce
           (fn [[where find ks seg-fns] [q k]]
             (let [q (if (= `if-state (first q))
                       (let [[_ eid then else] q
                             ?sk (gensym '?sk)]
-                        [[(cons 'vector ks) ?sk] ; was 'vector but https://github.com/tonsky/datascript/issues/262
+                        [[(cons 'vector ks) ?sk]
                          (list 'or
                            (list* 'and [eid ::key ?sk] then)
-                           (list* 'and (list 'not [eid ::key ?sk])
-                             [(list 'vector ::key ?sk) eid] else))]) ; was 'vector but https://github.com/tonsky/datascript/issues/262
+                           (list* 'and (list 'not ['_ ::key ?sk])
+                             [(list 'vector ::key ?sk) eid] else))])
                       q)
                   seg-fn (cond
                            (nil? k) nil
@@ -218,7 +220,7 @@
           [find where]
           (let [v (gensym "?true")]
             [[v] (into [[(list 'ground true) v]] where)]))]
-    [`[:find ~@find :where ~@where]
+    [find where
      (fn [row] (into [] (map #(% row)) seg-fns))]))
 
 (defn subscription
@@ -233,8 +235,10 @@
    an additional top item: a boolean, true for addition, false for deletion.
    Upon transaction of the subscription, f receives a first delta (positive only) representing the current state."
   [hq f]
-  (let [[q path-fn] (flatten-q hq)]
-    [{::live-query q
+  (let [[find where path-fn] (flatten-q hq)]
+    [{::live-query (concat [:find] find [:where] where)
+      ::prepared-live-query (q/prepare-query find where)
+      ::hierarchical-query hq
       ::handler
       (let [aprev-rows (atom #{})]
         (fn [rows]
@@ -258,7 +262,7 @@
             (reset! aprev-rows rows)
             (when (not= #{} delta)
               #_(prn 'Q q)
-              (prn 'DELTA delta)
+              #_(prn 'DELTA delta)
               (f delta)))))}]))
 
 (defn mount [template elt]
@@ -274,5 +278,5 @@
                     (f component path)))
         subscriptions (vec (mapcat #(subscription % update!) qks))]
     (d/transact! conn subscriptions)
-    (r/render [#(first (simplify (doto @dom prn)))] elt)))
+    (r/render [#(first (simplify @dom))] elt)))
 
