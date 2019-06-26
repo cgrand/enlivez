@@ -208,7 +208,7 @@
 
 ;; hiccup-style template
 (defn- handler [expr]
-  `(txing-handler (fn [~'%]
+  `(txing-handler (fn [~'% ~'$]
                     (cljs.core/this-as ~'%this
                       ~expr))))
 

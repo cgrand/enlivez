@@ -27,11 +27,14 @@
              #_(prn 'RUNNING q)
              (f (pq db-after)))))))))
 
+(defn call-with-db [db f this e]
+  (let [tx (.call f this e db)]
+    (if (map? tx) [tx] tx)))
+
 (defn txing-handler [f]
   (fn [e]
     (this-as this
-      (when-some [tx (.call f this e)]
-        (d/transact! conn (if (map? tx) [tx] tx))))))
+      (d/transact! conn [[:db.fn/call f this e]]))))
 
 (defprotocol Component
   (ensure! [c ks] "Returns the child component for (peek ks)")
