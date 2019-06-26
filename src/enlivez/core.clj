@@ -314,8 +314,8 @@
 
 (defn for [env known-vars q & body]
   (if-valid [{:keys [body options]} ::fragment-body body]
-    (let [sort-key (some (fn [{:keys [key value]}]
-                          (when (= key :sort) value)) options)
+    (let [sort-expr (some (fn [{:keys [key value]}]
+                           (when (= key :sort) value)) options)
           body (concat
                  (mapcat (fn [{:keys [key value]}]
                            (when-not (= key :sort) [key value]))
@@ -329,9 +329,12 @@
       (reify Template
         (get-schema [_] (get-schema child))
         (emit-cljs [_ schema]
-          (let [own-keys (map #(apply-aliases % known-vars') (keyvars q schema known-vars))
-                sort-key (if sort-key (map #(apply-aliases % known-vars') sort-key) own-keys)] ; known-vars and not known-vars' because we care about vars that were previously known
-            `(for-template '~?q '~own-keys '~sort-key
+          (let [own-keys (keyvars q schema known-vars)
+                sort-expr (or sort-expr (vec own-keys))
+                sort-args (vec (used-vars sort-expr known-vars'))
+                own-keys (map #(apply-aliases % known-vars') own-keys)
+                aliased-sort-args (map #(apply-aliases % known-vars') sort-args)] ; known-vars and not known-vars' because we care about vars that were previously known
+            `(for-template '~?q '~own-keys '~aliased-sort-args (fn [[~@sort-args]] ~sort-expr)
               ~(emit-cljs child schema))))))
     (throw (ex-info "Invalid body" {:body body}))))
 

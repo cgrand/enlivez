@@ -44,10 +44,18 @@
   (some-> (reduce get component (pop path))
     (delete! (peek path))))
 
-(defn for-component [child ump! parent-state-eid flat-ks]
+(defn for-component [child sort-f ump! parent-state-eid flat-ks]
   (let [children (atom {})
         sort-ks (atom {})
-        ordered-ks (atom (sorted-set))
+        ordered-ks (atom nil)
+        _ (reset! ordered-ks
+            (sorted-set-by
+              #(try
+                (compare %1 %2)
+                (catch :default e
+                  (let [[sort-k k] %1]
+                    (if (= (@sort-ks k) sort-k) ; existing key
+                      1 -1))))))
         doms (atom {})
         delete-child
         (fn [k]
@@ -70,9 +78,11 @@
             (ensure! [c ks]
               (let [[dir] (peek ks)]
                 (case dir
+                  ;; when switching sort order in between the ordered-ks are a mixed bag
                   0 (reify Component
                       (ensure! [c ks]
-                        (let [sort-k (peek ks)
+                        (let [sort-args (peek ks)
+                              sort-k (sort-f sort-args)
                               prev-sort-k (@sort-ks child-k)
                               ord (swap! ordered-ks
                                     #(-> %
@@ -82,7 +92,7 @@
                           (ump! (map (comp @doms second) ord)))
                         nil))
                   1 child)))
-            (delete! [c k] 
+            (delete! [c k]
               (let [[dir] k]
                 (case dir
                   0 (delete-child child-k) ; it may seem backward but it's ok; sort key doubles as sentinel
@@ -100,9 +110,7 @@
                             #(let [doms (swap! doms assoc k %)]
                                (ump! (map (comp doms second) @ordered-ks)))
                             parent-state-eid (conj (into flat-ks k) 1))]
-                #_(swap! ordered-ks conj k)
                 (swap! children assoc k child)
-                #_(ump! (map (comp @doms second) @ordered-ks))
                 child)))))
       (delete! [c k] (delete-child k)))))
 
@@ -152,11 +160,11 @@
             (d/transact! conn [[:db/retract parent-state-eid ::child state-eid]
                                [:db/retractEntity state-eid]]))) ))))
 
-(defn for-template [q ks sort-ks child]
+(defn for-template [q ks sort-ks sort-f child]
   (let [[qks child] child
         qks (cons (list [q ks] [[] 0] [[] sort-ks])
               (map #(list* [q ks] [[] 1] %) qks))]
-    [qks #(for-component child %1 %2 %3)]))
+    [qks #(for-component child sort-f %1 %2 %3)]))
 
 (defn fragment-template [body children]
   (let [qks (clj/for [[i [path [qks]]] (map vector (range) children)
@@ -260,7 +268,7 @@
             (reset! aprev-rows rows)
             (when (not= #{} delta)
               #_(prn 'Q q)
-              #_(prn 'DELTA delta)
+              (prn 'DELTA delta)
               (f delta)))))}]))
 
 (defn mount [template elt]
