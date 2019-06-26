@@ -89,7 +89,10 @@
                 (clj/for [clause conjunction
                       conjunction' not-dnf]
                   (conj conjunction' (list 'not clause))))
-              [[]])))
+              [[]]))
+      if (let [[_ test then else] clause]
+           (recur (list 'or (list 'and test then) (list 'and (list 'not test) then))))
+      = [[clause]])
     :else (throw (ex-info (str "Unexpected clause " (pr-str clause)) {:clause clause}))))
 
 (defn- scc
@@ -127,7 +130,11 @@
                 (if (seq? clause) 
                   (case (first clause)
                     ; emit nothing on not: imagine (not [?a :ident/attr :k])
-                    not nil)
+                    not nil
+                    = (let [syms (filter symbol? (next clause))]
+                        (clj/for [a syms, b syms
+                                  :when (not= a b)]
+                          [a b])))
                   ; else must be a vector
                   (let [[e a v] (into clause '[_ _ _])]
                     (when-not (symbol? a)
