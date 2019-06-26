@@ -286,3 +286,13 @@
     (d/transact! conn subscriptions)
     (r/render [#(first (simplify @dom))] elt)))
 
+(defrecord Desc [x]
+  IComparable
+  (-compare [a b]
+    (if (instance? Desc b)
+      (- (compare x (.-x b)))
+      (throw (ex-info "Can't compare." {:a a :b b})))))
+
+(defn desc [x] (Desc. x))
+(defn asc [x] x)
+
