@@ -16,13 +16,21 @@
     (keyword (namespace k) n)))
 
 (defn unsugar-query-map [qmap]
-  {:defaults (into {} (keep (fn [[k v]] (case v :or k nil))) qmap)
-   ; expand :attrs and remove :or
+  {:defaults (into {}
+               (keep
+                 (fn [[k v]]
+                   (cond
+                     (and (= :or v) (map? k)) k ; is a map but map conjing is a thing
+                     (symbol? k) [k v]
+                     :else nil)))
+               qmap)
+   ; expand :attrs, remove :or, auto keywords
    :qmap (into {}
            (mapcat
              (fn [[k v]]
                (cond
-                 (= :or v) nil
+                 (and (= :or v) (map? k)) nil
+                 (symbol? k) [[(keyword (name (ns-name *ns*)) (name k)) k]]
                  (and (keyword? v) (= "attrs" (name v)))
                  (clj/for [x k]
                    [(keyword (or (namespace v) (namespace x)) (name x)) (symbol (name x))])
