@@ -208,9 +208,11 @@
 
 ;; hiccup-style template
 (defn- handler [expr]
-  `(txing-handler (fn [~'% ~'$]
-                    (cljs.core/this-as ~'%this
-                      ~expr))))
+  `(txing-handler (fn [~'$ ~'%this ~'%]
+                    (let [f-or-tx# ~expr]
+                      (if (fn? f-or-tx#)
+                        (f-or-tx# ~'% ~'$)
+                        f-or-tx#)))))
 
 (defn- used-vars
   "vars must be a predicate"
