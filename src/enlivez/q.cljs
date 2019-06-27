@@ -266,6 +266,7 @@
       spy acc
       (or and not if or-else) (body-vars (next clause) rf acc)
       = (reduce ((filter symbol?) rf) acc (next clause))
+      not= (clause-vars (list 'not (cons '= (next clause))) rf acc)
       (throw (ex-info "Unexpected clause shape" {:clause clause})))
     :else
     (throw (ex-info "Unexpected clause shape" {:clause clause}))))
