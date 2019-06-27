@@ -41,14 +41,14 @@
              0 a
              (1 2) (indices a)
              nil)
-           (case vi
-             0 v
-             (1 2) (indices v)
-             nil))
-         (cond-> bound-vars
-           (= ei 2) (conj e)
-           (= ai 2) (conj a)
-           (= vi 2) (conj v))]))))
+          (case vi
+            0 v
+            (1 2) (indices v)
+            nil))
+        (cond-> bound-vars
+          (= ei 2) (conj e)
+          (= ai 2) (conj a)
+          (= vi 2) (conj v))]))))
 
 (defn pattern-vars [[e a v] rf acc]
   (cond-> acc
@@ -173,13 +173,16 @@
    bound-vars])
 
 (def builtins
-  {'vector vector 'ground identity 'identity identity '= =
-   'not= not=
-   'get-else (fn [$ e a else]
-               (if-some [[datom] (when (maybe-a-ref? e)
-                                   (seq (d/datoms $ :eavt e a)))]
-                 (.-v datom)
-                 else))})
+  (atom {'vector vector 'ground identity 'identity identity '= =
+         'not= not=
+         'get-else (fn [$ e a else]
+                     (if-some [[datom] (when (maybe-a-ref? e)
+                                         (seq (d/datoms $ :eavt e a)))]
+                       (.-v datom)
+                       else))}))
+
+(defn register-fn [sym f]
+  (swap! builtins assoc sym f))
 
 #_#_(defn ground-xforms+bv [f [arg] ret indices bound-vars]
     (let [iret (indices ret)]
@@ -234,7 +237,7 @@
     (if (seq? (nth clause 0))
       ; binding
       (let [[expr out] clause]
-        (if-some [f (builtins (first expr))]
+        (if-some [f (@builtins (first expr))]
           (fn-call-xforms+bv f (next expr) out indices bound-vars)
           (throw (ex-info "Unexpected expr" {:expr expr}))))
       (pattern-xform+bv clause indices bound-vars))
@@ -288,5 +291,3 @@
     (fn [db]
       (let [ctx (doto (object-array n) (aset 0 db))]
         (persistent! (rf (transient #{}) ctx))))))
-
-(def xx 42)

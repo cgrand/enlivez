@@ -194,18 +194,6 @@
               :else (known-vars x x)))]
     (walk x)))
 
-;; state
-
-(defn default-clauses [init qmap]
-  (let [{:keys [defaults qmap]} (unsugar-query-map qmap)
-        qmap (dissoc qmap :db/id)]
-    ; no recursion? 
-    ; support for recursive inits needs to be added on the transacting side upon instantiation too
-    (clj/for [[k v] qmap]
-      (if-some [v' (init k (defaults v))]
-        (list '= v v')
-        (throw (ex-info (str "Init state can't satisfy state query; no default for " k) {:key k :init init :qmap qmap}))))))
-
 ;; hiccup-style template
 (defn- handler [expr]
   `(txing-handler (fn [~'$ ~'%this ~'%]
@@ -224,20 +212,26 @@
   "Returns [expressions hollowed-x] where
    expressions is a sequence of [path expression] and hollowed-x is x where symbols and
    sequences have been replaced by nil."
-  [known-vars x]
+  [env known-vars x]
   (cond
     (associative? x)
     (reduce-kv (fn [[exprs x] k v]
                  (let [v (if (and (keyword? k) (.startsWith (name k) "on-"))
                            (handler v)
                            v)
-                       [subexprs v] (lift-expressions known-vars v)]
+                       [subexprs v] (lift-expressions env known-vars v)]
                    [(into exprs
                       (clj/for [[path subexpr] subexprs]
                         [(cons k path) subexpr]))
                     (assoc x k v)]))
       [{} x] x)
-    (or (symbol? x) (seq? x)) [{nil x} nil]
+    (seq? x)
+    (let [env' (update env :locals into (map (fn [sym] [sym {:name sym}])) (keys known-vars))
+          x' (ana/macroexpand-1 env' x)]
+      (if (= x x')
+        [{nil x} nil]
+        (recur env known-vars x')))
+    (symbol? x) [{nil x} nil]
     :else [{} x]))
 
 (defn terminal [env known-vars expr]
@@ -248,7 +242,7 @@
         `(terminal-template '[~@(map #(apply-aliases % known-vars) args)] (fn [[~@args]] ~expr))))))
 
 (defn fragment* [env known-vars body options]
-  (let [[exprs body] (lift-expressions known-vars (vec body))
+  (let [[exprs body] (lift-expressions env known-vars (vec body))
         children (clj/for [[paths expr] exprs]
                    [paths (let [{:keys [meta name]}
                                 (when-some [x (and (seq? expr) (first expr))]
@@ -280,20 +274,17 @@
         `(fragment-template ~body
            [~@(clj/for [[path child] children] [`'~path (emit-cljs child schema)])])))))
 
-(defn state [env known-vars init qmap body options]
-  ; TODO: init may have vars
+(defn state [env known-vars qmap body options]
   (let [{:keys [eid clauses]} (expand-query-map qmap)
-        default-clauses (default-clauses init qmap)
         known-vars (into known-vars
                      (assoc (fresh-vars clauses {}) ; empty known-vars because :state must not filter
                        eid (gensym eid)))
-        clauses (map #(apply-aliases % known-vars) clauses) ; TODO
-        default-clauses (map #(apply-aliases % known-vars) default-clauses)
+        clauses (map #(apply-aliases % known-vars) clauses)
         child (fragment* env known-vars body options)]
     (reify Template
       (get-schema [_] (get-schema child))
       (emit-cljs [_ schema]
-        `(state-template '~init '(if-state ~(gensym "sk") ~(known-vars eid) ~clauses ~default-clauses) ~(emit-cljs child schema))))))
+        `(state-template '(ensure-state ~(gensym "sk") ~(known-vars eid) ~clauses) ~(emit-cljs child schema))))))
 
 (defmacro ^:private if-valid
   ([bindings+spec+value then] `(if-valid ~bindings+spec+value ~then nil))
@@ -311,9 +302,9 @@
 
 (defn fragment [env known-vars & body]
   (if-valid [{:keys [body options]} ::fragment-body body]
-    (let [{:keys [init] qmap :state :as options} (into {} (map (juxt :key :value)) options)]
+    (let [{qmap :state :as options} (into {} (map (juxt :key :value)) options)]
       (if qmap
-        (state env known-vars (or init {}) qmap body options)
+        (state env known-vars qmap body options)
         (fragment* env known-vars body options)))
     (throw (ex-info "Invalid body" {:body body}))))
 

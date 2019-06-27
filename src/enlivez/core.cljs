@@ -11,9 +11,10 @@
 
 #_(def ^:private rules-registry (atom {}))
 
-;; Datasource is only accessible through subscription
-(def ^:private ^:dynamic *reentrant* false)
+;; *reentrant* doubles as a cache for newly allocated state eids
+(def ^:private ^:dynamic *reentrant* nil)
 
+;; Datasource is only accessible through subscription
 (def ^:private conn
   (doto (d/create-conn {::child {:db/valueType :db.type/ref
                                  :db/isComponent true
@@ -22,10 +23,10 @@
     (d/listen! ::meta-subscriber
       (fn [{:keys [tx-data db-after]}]
         (when-not *reentrant*
-          (binding [*reentrant* true]
-           (doseq [[eid q f pq] (d/q '[:find ?eid ?q ?f ?pq :where [?eid ::live-query ?q] [?eid ::prepared-live-query ?pq] [?eid ::handler ?f]] db-after)]
-             #_(prn 'RUNNING q)
-             (f (pq db-after)))))))))
+          (binding [*reentrant* {}]
+            (doseq [[eid q f pq] (d/q '[:find ?eid ?q ?f ?pq :where [?eid ::live-query ?q] [?eid ::prepared-live-query ?pq] [?eid ::handler ?f]] db-after)]
+              #_(prn 'RUNNING q)
+              (f (pq db-after)))))))))
 
 (defn call-with-db [db f this e]
   (let [tx (.call f this e db)]
@@ -146,10 +147,10 @@
     (ensure! [c ks] (ump! (f (peek ks))) nil)
     (delete! [c k] nil)))
 
-(defn state-component [entity-map child ump! parent-state-eid flat-ks]
-  (let [entity-map (assoc entity-map :db/id -1 ::key flat-ks) ; added apply pr-str because https://github.com/tonsky/datascript/issues/262
-        {state-eid -1} (:tempids (d/transact! conn [entity-map [:db/add parent-state-eid ::child -1]]))
-        child (child ump! state-eid flat-ks)]
+(defn state-component [child ump! parent-state-eid flat-ks]
+  (d/transact! conn [[:db/add -1 ::key flat-ks]
+                     [:db/add parent-state-eid ::child -1]])
+  (let [child (child ump! [::key flat-ks] flat-ks)]
     (reify
       ILookup
       (-lookup [c k] (-lookup child k))
@@ -160,8 +161,8 @@
         (try
           (delete! child k)
           (finally
-            (d/transact! conn [[:db/retract parent-state-eid ::child state-eid]
-                               [:db/retractEntity state-eid]]))) ))))
+            (d/transact! conn [[:db/retract parent-state-eid ::child [::key flat-ks]]
+                               [:db/retractEntity [::key flat-ks]]]))) ))))
 
 (defn for-template [q ks sort-ks sort-f child]
   (let [[qks child] child
@@ -180,9 +181,9 @@
 (defn terminal-template [args f]
   [[[[[] args]]] #(terminal-component f %1 %2 %3)])
 
-(defn state-template [entity-map entity-q child]
+(defn state-template [entity-q child]
   (let [[qks child] child]
-    [(map #(cons [entity-q nil] %) qks) #(state-component entity-map child %1 %2 %3)]))
+    [(map #(cons [entity-q nil] %) qks) #(state-component child %1 %2 %3)]))
 
 (defn include-template [clauses child]
   (let [[qks child] child]
@@ -197,6 +198,18 @@
       (mapcat simplify x))
     [x]))
 
+(q/register-fn `ensure-state-id
+  (fn [db k]
+    (or (*reentrant* k)
+      (let [eid (if-some [datom (first (d/datoms db :avet ::key k))]
+                  (.-e datom)
+                  (-> conn
+                    (d/transact! [[:db/add -1 ::key k]])
+                    :tempids
+                    (get -1)))]
+        (set! *reentrant* (assoc *reentrant* k eid))
+        eid))))
+
 (defn- flatten-q
   "Flattens a hierarchical query to a pair [actual-query f] where f
    is a function to map a row to a path."
@@ -205,12 +218,9 @@
   (let [[where find ks seg-fns]
         (reduce
           (fn [[where find ks seg-fns] [q k]]
-            (let [q (if (= `if-state (first q))
-                      (let [[_ ?sk eid then else] q]
-                        [[(cons 'vector ks) ?sk]
-                         (list 'if [eid ::key ?sk]
-                           (cons 'and then)
-                           (list* 'and [(list 'vector ::key ?sk) eid] else))])
+            (let [q (if (= `ensure-state (first q))
+                      (let [[_ ?sk eid clauses] q]
+                        (list* [(cons 'vector ks) ?sk] [(list `ensure-state-id '$ ?sk) eid] clauses))
                       q)
                   seg-fn (cond
                            (nil? k) nil
