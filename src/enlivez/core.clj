@@ -10,38 +10,44 @@
 
 ;; query maps syntax
 (defn- reverse-lookup
-  "Returns the direct keyword when the input keyord is reversed, else returns nil."
+  "Returns the direct keyword when the input keyword is reversed, else returns nil."
   [k]
   (when-some [[_ n] (when (keyword? k) (re-matches #"_(.*)" (name k)))]
     (keyword (namespace k) n)))
 
-(defn unsugar-query-map [qmap]
+(defn unsugar-query-map [env qmap]
   {:defaults (into {}
                (keep
                  (fn [[k v]]
                    (cond
                      (and (= :or v) (map? k)) k ; is a map but map conjing is a thing
-                     (symbol? k) [k v]
+                     (symbol? k) [(symbol (name k)) v] ; auto keyword
                      :else nil)))
                qmap)
    ; expand :attrs, remove :or, auto keywords
    :qmap (into {}
-           (mapcat
+           (keep
              (fn [[k v]]
                (cond
                  (and (= :or v) (map? k)) nil
-                 (symbol? k) [[(keyword (name (ns-name *ns*)) (name k)) k]]
+                 (symbol? k)
+                 (let [ns (some->>
+                            (when-some [ns (namespace k)]
+                              (or (ana/resolve-ns-alias env ns nil) (ana/resolve-macro-ns-alias env ns)))
+                            name)]
+                   [(keyword (or ns (name (ns-name *ns*))) (name k)) (symbol (name k))]) ; auto keyword
                  (and (keyword? v) (= "attrs" (name v)))
-                 (clj/for [x k]
-                   [(keyword (or (namespace v) (namespace x)) (name x)) (symbol (name x))])
-                 :else [[k v]])))
+                 (into {}
+                   (clj/for [x k]
+                     [(keyword (or (namespace x) (namespace v)) (name x)) (symbol (name x))]))
+                 :else [k v])))
            qmap)})
 
 (defn expand-query-map
   ; leveraging the spec is much work but it means the spec and this code
   ; may more easily drift away.
-  [qmap]
-  (let [{:keys [defaults qmap]} (unsugar-query-map qmap)
+  [env qmap]
+  (let [{:keys [defaults qmap]} (unsugar-query-map env qmap)
         eid (:db/id qmap (gensym 'id))
         qmap (dissoc qmap :db/id)]
     {:eid eid
@@ -49,7 +55,7 @@
                 (mapcat (fn [[k v]]
                   ; PONDER: outputting recursive clauses after all non-rec
                   (if (map? v) ; recursive expansion
-                    (let [{:keys [clauses], attr-eid :eid} (expand-query-map v)]
+                    (let [{:keys [clauses], attr-eid :eid} (expand-query-map env v)]
                       (cons
                         (if-some [k (reverse-lookup k)]
                           [attr-eid k eid]
@@ -64,9 +70,19 @@
                          [eid k v]))])))
                  qmap)}))
 
-(defn expand-query [x]
+#_(defn expand-strict-pull [[m v]]
+   )
+
+(defn expand-clause [env x]
+  (cond
+    (map? x) (:clauses (expand-query-map env x))
+    #_#_(and (vector? x) (map? (first x)))
+    (expand-strict-pull x)
+    :else [x]))
+
+(defn expand-query [env x]
   (let [x (if (map? x) [x] x)]
-    (into [] (mapcat (fn [x] (if (map? x) (:clauses (expand-query-map x)) [x])) x))))
+    (into [] (mapcat #(expand-clause env %)  x))))
 
 ;; keysets
 (defn fresh-vars [expanded-q known-vars]
@@ -100,7 +116,7 @@
               [[]]))
       if (let [[_ test then else] clause]
            (recur (list 'or (list 'and test then) (list 'and (list 'not test) then))))
-      = [[clause]])
+      (= not=) [[clause]])
     :else (throw (ex-info (str "Unexpected clause " (pr-str clause)) {:clause clause}))))
 
 (defn- scc
@@ -138,7 +154,7 @@
                 (if (seq? clause) 
                   (case (first clause)
                     ; emit nothing on not: imagine (not [?a :ident/attr :k])
-                    not nil
+                    (not not=) nil
                     = (let [syms (filter symbol? (next clause))]
                         (clj/for [a syms, b syms
                                   :when (not= a b)]
@@ -196,13 +212,11 @@
 
 ;; hiccup-style template
 (defn- handler [expr]
-  `(txing-handler (fn [~'$ ~'%this ~'%]
-                    (let [f-or-tx# ~expr]
-                      (if (fn? f-or-tx#)
-                        (f-or-tx# ~'% ~'$)
-                        f-or-tx#)))))
+  `(txing-handler (fn [~'%]
+                    (cljs.core/this-as ~'%this
+                      ~expr))))
 
-(defn- used-vars
+(defn used-vars
   "vars must be a predicate"
   [expr known-vars]
   ; TODO make it right: it's an overestimate
@@ -275,7 +289,7 @@
            [~@(clj/for [[path child] children] [`'~path (emit-cljs child schema)])])))))
 
 (defn state [env known-vars qmap body options]
-  (let [{:keys [eid clauses]} (expand-query-map qmap)
+  (let [{:keys [eid clauses]} (expand-query-map env qmap)
         known-vars (into known-vars
                      (assoc (fresh-vars clauses {}) ; empty known-vars because :state must not filter
                        eid (gensym eid)))
@@ -322,7 +336,7 @@
                            (when-not (= key :sort) [key value]))
                    options)
                  body)
-          q (expand-query q)
+          q (expand-query env q)
           vars (fresh-vars q known-vars)
           known-vars' (into known-vars vars)
           ?q (apply-aliases q known-vars')
@@ -344,7 +358,7 @@
         template (apply fragment &env aliases body)
         schema (get-schema template)]
     `(def ~(vary-meta name assoc ::template (mapv aliases args) ::schema schema)
-       ~(emit-cljs template schema))))
+      ~(emit-cljs template schema))))
 
 #_(defmacro defrule [rulename args & clauses]
    (if (seq? args)

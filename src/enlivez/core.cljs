@@ -35,7 +35,8 @@
 (defn txing-handler [f]
   (fn [e]
     (this-as this
-      (d/transact! conn [[:db.fn/call f this e]]))))
+      (when-some [tx (.call f this e)]
+        (d/transact! conn (if (map? tx) [tx] tx))))))
 
 (defprotocol Component
   (ensure! [c ks] "Returns the child component for (peek ks)")
@@ -299,13 +300,51 @@
     (d/transact! conn subscriptions)
     (r/render [#(first (simplify @dom))] elt)))
 
+(defprotocol ISortKey
+ (toggle [k])
+ (asc [k]))
+
+(declare desc)
+
 (defrecord Desc [x]
-  IComparable
-  (-compare [a b]
-    (if (instance? Desc b)
-      (- (compare x (.-x b)))
-      (throw (ex-info "Can't compare." {:a a :b b})))))
+ ISortKey
+ (toggle [_] x)
+ (asc [_] x)
+ IComparable
+ (-compare [a b]
+   (if (instance? Desc b)
+     (- (compare x (.-x b)))
+     (throw (ex-info "Can't compare." {:a a :b b}))))
+ IFn ; to wrap keywords
+ (-invoke [_ a] (desc (x a))))
 
-(defn desc [x] (Desc. x))
-(defn asc [x] x)
+(defn desc [x]
+  (Desc. (asc x)))
 
+(extend-protocol ISortKey
+  object
+  (toggle [k] (Desc. k))
+  (asc [k] k)
+  number
+  (toggle [k] (Desc. k))
+  (asc [k] k)
+  string
+  (toggle [k] (Desc. k))
+  (asc [k] k)
+  boolean
+  (toggle [k] (Desc. k))
+  (asc [k] k)
+  nil
+  (toggle [k] nil)
+  (asc [k] nil))
+
+(defn push-or-toggle-sortk [sort-ks k]
+  (let [basis (asc k)
+        same-basis? (fn [x] (= basis (asc x)))
+        fk (first sort-ks)]
+    (if (same-basis? fk)
+      (cons (toggle fk) (next sort-ks))
+      (cons k (remove same-basis? sort-ks)))))
+
+(defn sortk [x sort-ks]
+  (into [] (map #(% x)) sort-ks))

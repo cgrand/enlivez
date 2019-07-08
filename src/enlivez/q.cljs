@@ -147,7 +147,8 @@
 (defn =-xform+bv [args indices bound-vars]
   (let [[v :as values] (seq (remove symbol? args))
         [in & other-ins :as ins] (seq (keep #(some-> % bound-vars indices) args))
-        outs (keep #(when-not (bound-vars %) (indices %)) args)]
+        out-vars (remove bound-vars args)
+        outs (keep indices out-vars)]
     [(cond
        values
        (if (apply = values)
@@ -163,7 +164,7 @@
        (throw (ex-info "Clause are not automatically reordered yet, can't apply" {}))
        :else
        identity)
-     (into bound-vars outs)]))
+     (into bound-vars out-vars)]))
 
 (defn spy-xform+bv [_ indices bound-vars]
   [(fn [rf]
@@ -221,8 +222,9 @@
       [(fn [rf]
          (fn [acc ctx]
            (reduce (fn [ctx setter] (setter ctx)) ctx setters)
-           (aset ctx iret (f))
-           (rf acc ctx)))
+           (if-some [ret (f)]
+             (rf acc (doto ctx (aset iret ret)))
+             acc)))
        (conj bound-vars ret)]
       ; predicate call
       [(fn [rf]
@@ -252,6 +254,7 @@
       or-else (let [[_ test else] clause]
                 (if-xform+bv [test '(and) else] indices bound-vars))
       = (=-xform+bv (next clause) indices bound-vars)
+      not= (clause-xform+bv (list 'not (cons '= (next clause))) indices bound-vars)
       (throw (ex-info "Unexpected clause shape" {:clause clause})))
     :else
     (throw (ex-info "Unexpected clause shape" {:clause clause}))))

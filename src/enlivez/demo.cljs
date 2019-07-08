@@ -2,10 +2,9 @@
   (:require [enlivez.core :as ez]
     [datascript.core :as d]))
 
-(ez/deftemplate new-item [#_#_self new-todo]
-  :init {::new-todo ""}
+(ez/deftemplate new-item []
   :state {:db/id self
-          [new-todo] ::attrs}
+          new-todo ""}
   [:li
     [:input {:value new-todo
              :on-change (doto [[:db/add self ::new-todo (-> % .-target .-value)]] prn)}]
@@ -15,19 +14,18 @@
 
 (ez/deftemplate todo []
   [:ul
-   (new-item #_#_ self new-todo)
+   (new-item)
    (ez/for {:db/id item [title done] :item/attrs}
     :state {:db/id self
-            [editing working-title] ::attrs
-            {editing false
-             working-title ""} :or}
+            editing false
+            working-title ""}
     :sort [done title]
     [:li
      [:input {:type :checkbox :checked done
               :on-change [[:db/add item :item/done (not done)]]}]
      [:span {:on-click (when (not editing) [{:db/id self ::editing true ::working-title title}])}
-      (ez/for [[(= editing false)]] title)
-      (ez/for [[(= editing true)]]
+      (ez/for [(= editing false)] title)
+      (ez/for [(= editing true)]
         [:input {:value working-title
                  :on-change [[:db/add self ::working-title (-> % .-target .-value)]]
                  :on-blur [[:db/add self ::editing false]
