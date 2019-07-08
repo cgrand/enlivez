@@ -40,14 +40,13 @@
 
 (defprotocol Component
   (ensure! [c ks] "Returns the child component for (peek ks)")
-  (delete! [c k] "Deletes the child component"))
+  (delete! [c] "Deletes this component"))
 
 (defn ensure-path! [component path]
   (reduce ensure! component (next (reductions conj [] path))))
 
 (defn delete-path! [component path]
-  (some-> (reduce get component (pop path))
-    (delete! (peek path))))
+  (some-> (reduce get component path) delete!))
 
 (defn for-component [child sort-f ump! parent-state-eid flat-ks]
   (let [children (atom {})
@@ -77,12 +76,6 @@
             (-lookup [c k]
               (let [[dir] k]
                 (case dir
-                  0 nil
-                  1 child)))
-            Component
-            (ensure! [c ks]
-              (let [[dir] (peek ks)]
-                (case dir
                   ;; when switching sort order in between the ordered-ks are a mixed bag
                   0 (reify Component
                       (ensure! [c ks]
@@ -95,14 +88,16 @@
                                        (conj [sort-k child-k])))]
                           (swap! sort-ks assoc child-k sort-k)
                           (ump! (map (comp @doms second) ord)))
-                        nil))
+                        nil)
+                      (delete! [c]
+                        (delete-child child-k)
+                        (delete! child)))
                   1 child)))
-            (delete! [c k]
-              (let [[dir] k]
-                (case dir
-                  0 (delete-child child-k) ; it may seem backward but it's ok; sort key doubles as sentinel
-                  1 nil)))))]
-    (reify 
+            Component
+            (ensure! [c ks]
+              (get c (peek ks)))
+            (delete! [c] nil)))]
+    (reify
       ILookup
       (-lookup [c k]
         (some->> (@children k) (child-component k)))
@@ -117,7 +112,7 @@
                             parent-state-eid (conj (into flat-ks k) 1))]
                 (swap! children assoc k child)
                 child)))))
-      (delete! [c k] (delete-child k)))))
+      (delete! [c] nil))))
 
 (defn fragment-component [dom children ump! parent-state-eid flat-ks]
   (let [adom (atom dom)
@@ -138,7 +133,7 @@
             c)))
       Component
       (ensure! [c ks] (get c (peek ks)))
-      (delete! [c k] nil))))
+      (delete! [c] nil))))
 
 (defn terminal-component [f ump! parent-state-eid flat-ks]
   (reify
@@ -146,7 +141,7 @@
     (-lookup [c k] nil)
     Component
     (ensure! [c ks] (ump! (f (peek ks))) nil)
-    (delete! [c k] nil)))
+    (delete! [c] nil)))
 
 (defn state-component [child ump! parent-state-eid flat-ks]
   (d/transact! conn [[:db/add -1 ::key flat-ks]
@@ -158,12 +153,12 @@
       Component
       (ensure! [c ks]
         (ensure! child ks))
-      (delete! [c k]
+      (delete! [c]
         (try
-          (delete! child k)
+          (delete! child)
           (finally
             (d/transact! conn [[:db/retract parent-state-eid ::child [::key flat-ks]]
-                               [:db/retractEntity [::key flat-ks]]]))) ))))
+                               [:db/retractEntity [::key flat-ks]]])))))))
 
 (defn for-template [q ks sort-ks sort-f child]
   (let [[qks child] child
