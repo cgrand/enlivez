@@ -294,6 +294,8 @@
     (d/transact! conn subscriptions)
     (r/render [#(first (simplify @dom))] elt)))
 
+;; Sorting
+
 (defprotocol ISortKey
  (toggle [k])
  (asc [k]))
@@ -342,3 +344,17 @@
 
 (defn sortk [x sort-ks]
   (into [] (map #(% x)) sort-ks))
+
+;; IO
+(defn io-trigger*
+  ([q binding send]
+    (io-trigger* q binding send (constantly nil)))
+  ([q binding send stop]
+    (let [tx! #(d/transact! conn %)]
+      (tx!
+        (subscription [[q binding] [[] []]]
+          (fn [delta]
+            (doseq [[tuple _ addition] delta]
+              (if addition
+                (send tuple)
+                (stop tuple)))))))))

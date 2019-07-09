@@ -369,3 +369,9 @@
      `(do
         ~@(map (fn [args+clauses] `(defrule ~rulename ~@args+clauses)) (cons args clauses)))
      ))
+
+(defmacro io-trigger [q & body]
+  (let [q (expand-query &env q)
+        vars (vec (used-vars `(do ~@body) (fresh-vars q {})))]
+    `(io-trigger* '~q '~vars
+       (fn ~vars ~@body))))
