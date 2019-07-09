@@ -21,28 +21,45 @@
             :on-click [[:db/add self ::show-done (not show-done)]]}]
    "Show done?"])
 
+(ez/deftemplate sort-btn [self show-done]
+   [:label
+    [:input {:type :checkbox
+             :checked show-done
+             :on-click [[:db/add self ::show-done (not show-done)]]}]
+    "Show done?"])
+
 (defn on-blur [self item working-title]
   [[:db/add self ::editing false]
    [:db/add item :item/title working-title]])
 
 (ez/deftemplate todo []
   :state {:db/id self
-          show-done true}
+          show-done true
+          order :ascending}
   [:ul
    (new-item)
-   (items-filter self show-done)
+   [:div
+    (items-filter self show-done)
+    [:button {:on-click [[:db/add self ::order (case order
+                                                 :ascending :descending
+                                                 :descending :ascending)]]}
+     (case order
+       :ascending "descending"
+       :descending "ascending")]]
    (ez/for
     [{:db/id item
       [title done] :item/attrs}
      (or (= true show-done)
          (= false done))]
-     #_[[item :item/title title]
-        [item :item/done done]
-        (= done show-done)]
+    #_[[item :item/title title]
+       [item :item/done done]
+       (= done show-done)]
      :state {:db/id self
              editing false
              working-title ""}
-     :sort [done title]
+     :sort (case order
+             :descending [done (ez/desc title)]
+             [done title])
      [:li
       [:input {:type :checkbox :checked done
                :on-change [[:db/add item :item/done (not done)]]}]
