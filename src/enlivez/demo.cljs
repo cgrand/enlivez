@@ -12,16 +12,31 @@
               :on-click [{:item/title new-todo :item/done false}
                          [:db/add self ::new-todo ""]]} "Add!"]])
 
+(ez/deftemplate items-filter [self show-done]
+   [:label
+    [:input {:type :checkbox
+             :checked show-done
+             :on-click [[:db/add self ::show-done (not show-done)]]}]
+    "Show done?"])
+
 (defn on-blur [self item working-title]
   [[:db/add self ::editing false]
    [:db/add item :item/title working-title]])
 
 (ez/deftemplate todo []
+  :state {:db/id self
+          show-done true}
   [:ul
    (new-item)
+   (items-filter self show-done)
    (ez/for
-     {:db/id item [title done] :item/attrs}
-     #_[[item :item/title title] [item :item/done done]]
+     [{:db/id item
+       [title done] :item/attrs}
+      (or (= true show-done)
+          (= false done))]
+     #_[[item :item/title title]
+        [item :item/done done]
+        (= done show-done)]
     :state {:db/id self
             editing false
             working-title ""}
