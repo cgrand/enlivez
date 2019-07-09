@@ -1,5 +1,13 @@
 # Enlive Z
 
+## Handlers
+
+Handlers in EZ templates are not functions but expressions. These expressions must evaluate to transaction data.
+
+There are two implicit locals available to handler expressions: `%` for the event and `%this` for the Javascript `this`.
+
+Since handlers expression are, well, expressions you can use any function or macro inside them.
+
 ## Query Maps
 
 Many queries can be expressed by using the query-map syntax. This syntax is a mix
