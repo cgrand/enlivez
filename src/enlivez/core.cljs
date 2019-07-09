@@ -25,7 +25,6 @@
         (when-not *reentrant*
           (binding [*reentrant* {}]
             (doseq [[eid q f pq] (d/q '[:find ?eid ?q ?f ?pq :where [?eid ::live-query ?q] [?eid ::prepared-live-query ?pq] [?eid ::handler ?f]] db-after)]
-              #_(prn 'RUNNING q)
               (f (pq db-after)))))))))
 
 (defn call-with-db [db f this e]
