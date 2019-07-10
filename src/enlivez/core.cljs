@@ -356,5 +356,5 @@
           (fn [delta]
             (doseq [[tuple _ addition] delta]
               (if addition
-                (send tuple)
-                (stop tuple)))))))))
+                (apply send tuple)
+                (apply stop tuple)))))))))
