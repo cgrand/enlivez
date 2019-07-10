@@ -187,11 +187,11 @@
 (declare ^::special for ^::special fragment ^::special terminal)
 
 (defn simplify [x]
-  (if (sequential? x)
-    (if (keyword? (first x))
-      [(into [(first x)] (mapcat simplify (rest x)))]
-      (mapcat simplify x))
-    [x]))
+  (cond
+    (not (sequential? x)) [x]
+    (and (vector? x) (keyword? (first x)))
+    [(into [(first x)] (mapcat simplify (rest x)))]
+    :else (mapcat simplify x)))
 
 (q/register-fn `ensure-state-id
   (fn [db k]
