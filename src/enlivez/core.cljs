@@ -34,8 +34,13 @@
 (defn txing-handler [f]
   (fn [e]
     (this-as this
-      (when-some [tx (.call f this e)]
+      (when-some [tx (f e this)]
         (d/transact! conn (if (map? tx) [tx] tx))))))
+
+(defprotocol Template
+  (additional-schema [t] "Returns schema declarations that should augment the current db")
+  (query-tree [t whole-schema])
+  (instantiate! [t mount! ks]))
 
 (defprotocol Component
   (ensure! [c ks] "Returns the child component for (peek ks)")
@@ -47,7 +52,10 @@
 (defn delete-path! [component path]
   (some-> (reduce get component path) delete!))
 
-(defn for-component [child sort-f ump! parent-state-eid flat-ks]
+(defn- update-top [v f & args]
+  (conj (pop v) (apply f (peek v) args)))
+
+(defn for-component [child sort-f ump! flat-ks]
   (let [children (atom {})
         sort-ks (atom {})
         ordered-ks (atom nil)
@@ -105,22 +113,22 @@
         (let [k (peek ks)]
           (child-component k
             (or (@children k)
-              (let [child (child
+              (let [child (instantiate! child
                             #(let [doms (swap! doms assoc k %)]
                                (ump! (map (comp doms second) @ordered-ks)))
-                            parent-state-eid (conj (into flat-ks k) 1))]
+                            (update-top flat-ks into (conj k 1)))]
                 (swap! children assoc k child)
                 child)))))
       (delete! [c] nil))))
 
-(defn fragment-component [dom children ump! parent-state-eid flat-ks]
+(defn fragment-component [dom children ump! flat-ks]
   (let [adom (atom dom)
         children
         (into []
           (map-indexed
             (fn [i [path child]]
-              (child #(ump! (swap! adom assoc-in path %)) parent-state-eid
-                (conj flat-ks i))))
+              (instantiate! child #(ump! (swap! adom assoc-in path %))
+                (update-top flat-ks conj i))))
           children)]
     (ump! dom)
     (reify
@@ -134,7 +142,7 @@
       (ensure! [c ks] (get c (peek ks)))
       (delete! [c] nil))))
 
-(defn terminal-component [f ump! parent-state-eid flat-ks]
+(defn terminal-component [f ump! flat-ks]
   (reify
     ILookup
     (-lookup [c k] nil)
@@ -142,10 +150,10 @@
     (ensure! [c ks] (ump! (f (peek ks))) nil)
     (delete! [c] nil)))
 
-(defn state-component [child ump! parent-state-eid flat-ks]
-  (d/transact! conn [[:db/add -1 ::key flat-ks]
-                     [:db/add parent-state-eid ::child -1]])
-  (let [child (child ump! [::key flat-ks] flat-ks)]
+(defn state-component [child ump! [parent-flat-k flat-k]]
+  (d/transact! conn [[:db/add -1 ::key flat-k]
+                     [:db/add [::key parent-flat-k] ::child -1]])
+  (let [child (instantiate! child ump! [flat-k (conj flat-k '/)])]
     (reify
       ILookup
       (-lookup [c k] (-lookup child k))
@@ -156,33 +164,52 @@
         (try
           (delete! child)
           (finally
-            (d/transact! conn [[:db/retract parent-state-eid ::child [::key flat-ks]]
-                               [:db/retractEntity [::key flat-ks]]])))))))
+            (d/transact! conn [[:db/retract [::key parent-flat-k] ::child [::key flat-k]]
+                               [:db/retractEntity [::key flat-k]]])))))))
 
 (defn for-template [q ks sort-ks sort-f child]
-  (let [[qks child] child
-        qks (cons (list [q ks] [[] 0] [[] sort-ks])
-              (map #(list* [q ks] [[] 1] %) qks))]
-    [qks #(for-component child sort-f %1 %2 %3)]))
+  (reify  Template
+    (additional-schema [t] (additional-schema child))
+    (query-tree [t whole-schema]
+      {[q ks] {0 {[[] sort-ks] nil}
+               1 (query-tree child  whole-schema)}})
+    (instantiate! [t mount! ks]
+      (for-component child sort-f mount! ks))))
 
 (defn fragment-template [body children]
-  (let [qks (clj/for [[i [path [qks]]] (map vector (range) children)
-                  qk qks]
-              (cons [[] i] qk))
-        children (vec (clj/for [[path [qks f]] children]
-                        [path f]))]
-    [qks #(fragment-component body children %1 %2 %3)]))
+  (reify Template
+    (additional-schema [t] (into {} (map additional-schema) (map peek children)))
+    (query-tree [t whole-schema]
+      (into {} (map-indexed (fn [i child] [i (query-tree child whole-schema)])) (map peek children)))
+    (instantiate! [t mount! ks]
+      (fragment-component body children mount! ks))))
 
 (defn terminal-template [args f]
-  [[[[[] args]]] #(terminal-component f %1 %2 %3)])
+  (reify
+    Template
+    (additional-schema [t] {})
+    (query-tree [t whole-schema]
+      {[[] args] nil})
+    (instantiate! [t mount! ks]
+      (terminal-component f mount! ks))))
 
 (defn state-template [entity-q child]
-  (let [[qks child] child]
-    [(map #(cons [entity-q nil] %) qks) #(state-component child %1 %2 %3)]))
+  (reify
+    Template
+    (additional-schema [t] {})
+    (query-tree [t whole-schema]
+      {[entity-q nil] (query-tree child whole-schema)})
+    (instantiate! [t mount! ks]
+      (state-component child mount! ks))))
 
 (defn include-template [clauses child]
-  (let [[qks child] child]
-    [(map #(cons [clauses nil] %) qks) child]))
+  (reify
+    Template
+    (additional-schema [t] {})
+    (query-tree [t whole-schema]
+      {[clauses nil] (query-tree child whole-schema)})
+    (instantiate! [t mount! ks]
+      (instantiate! child mount! ks))))
 
 (declare ^::special for ^::special fragment ^::special terminal)
 
@@ -204,6 +231,15 @@
                     (get -1)))]
         (set! *reentrant* (assoc *reentrant* k eid))
         eid))))
+
+(defn- flatten-hq
+  "interim fn to map from query trees to hierarchical queries"
+  [qt]
+  (or
+    (seq (clj/for [[k v] qt
+                   q (flatten-hq v)]
+           (cons (if (number? k) [nil k] k) q)))
+    [()]))
 
 (defn- flatten-q
   "Flattens a hierarchical query to a pair [actual-query f] where f
@@ -281,16 +317,18 @@
 
 (defn mount [template elt]
   (let [dom (r/atom nil)
-        [qks instantiate!] template
-        {root-eid -1} (:tempids (d/transact! conn [[:db/add -1 ::root true]]))
-        component (instantiate! #(reset! dom %) root-eid [])
+        schema (let [db @conn]
+                 (doto (into (:schema db) (additional-schema template))
+                   (->> (d/init-db (d/datoms db :eavt)) (d/reset-conn! conn))))
+        {root-eid -1} (:tempids (d/transact! conn [[:db/add -1 ::key []]]))
+        component (instantiate! template #(reset! dom %) [[] []])
         update! (fn [delta]
                   (doseq [path delta
                           :let [upsert (peek path)
                                 path (pop path)
                                 f (if upsert ensure-path! delete-path!)]]
                     (f component path)))
-        subscriptions (vec (mapcat #(subscription % update!) qks))]
+        subscriptions (vec (mapcat #(subscription % update!) (flatten-hq (query-tree template schema))))]
     (d/transact! conn subscriptions)
     (r/render [#(first (simplify @dom))] elt)))
 

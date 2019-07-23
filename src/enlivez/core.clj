@@ -216,9 +216,8 @@
 
 ;; hiccup-style template
 (defn- handler [expr]
-  `(txing-handler (fn [~'%]
-                    (cljs.core/this-as ~'%this
-                      ~expr))))
+  `(txing-handler (fn [~'% ~'%this]
+                    ~expr)))
 
 (defn used-vars
   "vars must be a predicate"
