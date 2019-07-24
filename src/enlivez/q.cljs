@@ -3,14 +3,29 @@
   (:require [datascript.core :as d]))
 
 (defn indexed-attr? [db attr]
-  (let [schema (get (:schema db) attr)]
+  (let [schema (get (:rschema db) attr)]
     (or (:db/unique schema) (:db/index schema))))
+
+(defn ref-attr? [db attr]
+  (let [schema (get (:rschema db) attr)]
+    (= :db.type/ref (:db/valueType schema))))
+
+(defn maybe-lookup-ref?
+  [r]
+  (or (sequential? r) (keyword? r)))
 
 (defn maybe-a-ref?
   [r]
   (if (number? r)
     (pos? r)
-    (sequential? r)))
+    (maybe-lookup-ref? r)))
+
+(defn resolve-ref [db r]
+  (cond
+    (number? r) (when (pos? r) r)
+    (keyword? r) (some-> (first (d/datoms db :avet :db/ident r)) .-e)
+    (sequential? r) (let [[a v] r]
+                      (some-> (first (d/datoms db :avet a v)) .-e))))
 
 (defn profile-digit [bound-vars pat]
   (cond

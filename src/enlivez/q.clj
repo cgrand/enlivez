@@ -43,13 +43,24 @@
                                       nil)))
                              (take-while some?)
                              (some #{'e}))
-             filters (->> args-in-index-order (drop (count datoms-args))
-                       (keep (fn [arg]
-                               (let [prop (symbol (str ".-" arg))]
-                                 (case (modes arg)
-                                   \i `(= (~prop ~'datom) (aget ~'ctx ~arg))
-                                   \v `(= (~prop ~'datom) ~arg)
-                                   nil)))))
+             filtering-args (drop (count datoms-args) args-in-index-order)
+             filtered-constant-v (if (and (= \v (modes 'v))
+                                       (some #(= 'v %) filtering-args))
+                                   (case (modes 'a)
+                                     (\i \v) :out-of-body
+                                     :in-body)
+                                   false)
+             filters (keep (fn [arg]
+                             (let [prop (symbol (str ".-" arg))]
+                               (case (modes arg)
+                                 \i `(= (~prop ~'datom) (aget ~'ctx ~arg))
+                                 \v (if (and (= 'v arg) (= :in-body filtered-constant-v))
+                                      `(if (and (some? ~'rv) (ref-attr? (aget ~'ctx ~'db) (.-a ~'datom)))
+                                         `(= (.-v ~'datom) ~'rv)
+                                         `(= (.-v ~'datom) ~'v))
+                                      `(= (~prop ~'datom) ~arg))
+                                 nil)))
+                       filtering-args)
              body `(do
                      ~@(for [out outs
                              :let [prop (symbol (str ".-" out))]]
@@ -69,11 +80,33 @@
                    ~@datoms-args)
                   ~@(when check-valid-e ; wrap above call in below when-not
                      [`(when (maybe-a-ref? (aget ~'ctx ~'e)))])))
+             reduce-form (case filtered-constant-v
+                           false reduce-form
+                           :out-of-body
+                           `(let [db# (aget ~'ctx ~'db)]
+                              (if-some [~'v (if (ref-attr? db# ~(case (modes 'a)
+                                                                  \v 'a
+                                                                  \i `(aget ~'ctx ~'a)))
+                                              (resolve-ref db# ~'v)
+                                              ~'v)]
+                                ~reduce-form
+                                'acc))
+                           :in-body
+                           `(let [~'rv (resolve-ref (aget ~'ctx ~'db) ~'v)]
+                              ~reduce-form))
              #_#_reduce-form
              `(do
                 (prn 'datoms ~index ~@datoms-args)
                 (if ~(some? check-valid-e) (prn 'check-valid-e '~index '~profile))
-                ~reduce-form)]
+                ~reduce-form)
+             reduce-form (if (seq filters)
+                           `(do
+                              (binding [~'*print-fn* ~'*print-err-fn*]
+                                (println "WARNING: filtered scan for" (pr-str ~'[e a v]))
+                                ~@(when (= :in-body filtered-constant-v)
+                                    [(println "WARNING: filtered scan aggravated by unbound attribute")]))
+                              ~reduce-form)
+                           reduce-form)]
          (cond
            (not= :avet index) reduce-form
            (#{\v \i} (modes 'a))
