@@ -8,41 +8,35 @@ There are two implicit locals available to handler expressions: `%` for the even
 
 Since handlers expression are, well, expressions you can use any function or macro inside them.
 
-## Query Maps
-
-Many queries can be expressed by using the query-map syntax. This syntax is a mix
+## Queries
+### Query Maps
+Many queries can be expressed by using the query-map syntax. This syntax can be seen as a mix
 of pattern matching, and destructuring with a pinch of pull syntax.
 
-Like in pattern matching (and unlike destructuring), keys are in key position: `{:first-name name}`.
+The core of the syntax is made of only two concepts: pattern matching and defaults. Everything else are shorthands that can be expressed with the core syntax.
 
-Like with destructuring, one can use `:attrs` (think `:keys`) and `:or` (and don't forget key val order is inverted):
+#### Pattern matching
+Map entries whose keys are keywords (`:db/id` or attributes -- regular or reversed) are pattern entries and their values may be either values, unqualified symbols (or `_`) or maps.
 
-```clj
-{[first-name lass-name] :attrs}
-; is equivalent to
- {:first-name first-name :last-name last-name}
+`{:person/birth-year 1978}` matches entities whose `:person/birth-year` attribute is valued to 1978; it's equivalent to `[[_ :person/birth-year 1978]]` in Datomic query language.
 
-{[first last] :name/keys}
-; is equivalent to
-{[:name/first :name/last] :attrs}
-; which is equivalent to
-{:name/first first
- :name/last last}
- 
-; defaults can be provided 
-{[first last] :name/keys
- {first "John" last "Does"} :or}
-```
+`{:person/name name }` retrieves names of entities whose birth year is 1978; it's equivalent to `[:find ?name :where [[?p :person/birth-year 1978] [?p :person/name ?name]]]` in Datomic query language.
 
-There's no `:as` because only entities can patterned, so if you want a reference to the entity just match its `:db/id` attribute!
+`{:person/name name :person/children {:person/name "John"}}` returns names of persons who have one kid named John. `[:find ?name :where [[?p :person/children ?c] [?c :person/name "John"] [?p :person/name ?name]]]`.
+
+The same query could have been expressed as `{:person/name "John" :person/_children {:person/name name}}`.
+
+If a symbol (except `_` of course) is bound twice it must be bound to the same value: `{:person/name name :person/children {:person/name name}}` finds name of person who gave the same name to their kid.
+
+#### Defaults
+Map entries whose _values_ are `:or` have defaults maps as keys.
 
 ```clj
-{:family/_parent child}
-; and it workq with :attrs too
-{[_parent]  :family/keys}
-; or
-{[:family/_parent]  :attrs}
+{:person/middle-name mname
+ {mname "-"} :or}
 ```
+
+#### Shorthands
 
 ## Why this Z ?
 
