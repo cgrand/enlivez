@@ -104,7 +104,7 @@
                               (binding [~'*print-fn* ~'*print-err-fn*]
                                 (println "WARNING: filtered scan for" (pr-str ~'[e a v]))
                                 ~@(when (= :in-body filtered-constant-v)
-                                    [(println "WARNING: filtered scan aggravated by unbound attribute")]))
+                                    [`(println "WARNING: filtered scan aggravated by unbound attribute")]))
                               ~reduce-form)
                            reduce-form)]
          (cond
