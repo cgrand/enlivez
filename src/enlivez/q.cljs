@@ -3,12 +3,10 @@
   (:require [datascript.core :as d]))
 
 (defn indexed-attr? [db attr]
-  (let [schema (get (:rschema db) attr)]
-    (or (:db/unique schema) (:db/index schema))))
+  (some-> (:rschema db) :db/index attr))
 
 (defn ref-attr? [db attr]
-  (let [schema (get (:rschema db) attr)]
-    (= :db.type/ref (:db/valueType schema))))
+  (some-> (:rschema db) :db.type/ref attr))
 
 (defn maybe-lookup-ref?
   [r]

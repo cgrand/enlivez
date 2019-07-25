@@ -1,5 +1,7 @@
-^{:auto-testing true
-  :open-url false}
+^{:watch-dirs ["src" "test"]
+  :auto-testing true
+  :open-url true
+  :ring-server-options {:port 9300}}
 {:optimizations :none
  ; :checked-arrays :warn
  :closure-defines {"goog.DEBUG" true}

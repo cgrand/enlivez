@@ -10,9 +10,9 @@
   ;;; ClojureScript Figwheel REPL
  {:fw
   {:extra-deps {com.bhauman/figwheel-main {:mvn/version "0.2.0"}}
-   :extra-paths ["src" "dev_cljs" "target"]
+   :extra-paths ["src" "resources" "target" "test"]
    :main-opts ["-m" "figwheel.main"
-               ; "--compile-opts" "dev.cljs.edn:@mod.cljs.edn"
+               "--compile-opts" "dev.cljs.edn"
                ; "--compile"
                "--repl"]}
   
