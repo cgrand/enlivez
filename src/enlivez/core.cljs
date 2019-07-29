@@ -34,7 +34,7 @@
 (defn txing-handler [f]
   (fn [e]
     (this-as this
-      (when-some [tx (f e this)]
+      (when-some [tx (f e this @conn)]
         (d/transact! conn (if (map? tx) [tx] tx))))))
 
 (defprotocol Template

@@ -216,8 +216,7 @@
 
 ;; hiccup-style template
 (defn- handler [expr]
-  `(txing-handler (fn [~'% ~'%this]
-                    ~expr)))
+  `(txing-handler (fn [~'% ~'%this ~'%db] ~expr)))
 
 (defn used-vars
   "vars must be a predicate"
