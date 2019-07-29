@@ -9,6 +9,14 @@ There are two implicit locals available to handler expressions: `%` for the even
 Since handlers expression are, well, expressions you can use any function or macro inside them.
 
 ## Queries
+A query is either a map, a list or a vector.
+
+A list is a query operation, whose head is amongst `=`, `not=`, `and`, `or` or `not` (and the more experimental `if` and `or-else`).
+
+A vector is either a pattern `[e a v]` or a function call `[(f arg1 .. argN) ret]` (See `enlivez.q/builtins` and `enlivez.q/register-fn` to know or extend available fns.)
+
+However there's an irregularity: at the root of a query, a vector has to be interpreted as a shortand for `and`.
+
 ### Query Maps
 Many queries can be expressed by using the query-map syntax. This syntax can be seen as a mix
 of pattern matching, and destructuring with a pinch of pull syntax.

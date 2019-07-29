@@ -81,12 +81,21 @@
 (defn expand-clause [env x]
   (cond
     (map? x) (:clauses (expand-query-map env x))
+    (seq? x) (case (first x)
+               and (mapcat #(expand-clause env %) (rest x))
+               not [(cons 'not (mapcat #(expand-clause env %) (rest x)))]
+               or [(cons 'or (map #(cons 'and (expand-clause env %)) (rest x)))]
+               (= not= if or-else) [x])
     #_#_(and (vector? x) (map? (first x)))
     (expand-strict-pull x)
     :else [x]))
 
 (defn expand-query [env x]
-  (let [x (if (map? x) [x] x)]
+  (let [x (cond
+            (map? x) [x]
+            (seq? x) [x]
+            (vector? x) x
+            :else (throw (ex-info "Unexpecetd query shape, it can be a map, a list or a vector." {:q x})))]
     (into [] (mapcat #(expand-clause env %)  x))))
 
 ;; keysets

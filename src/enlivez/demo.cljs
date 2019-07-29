@@ -47,10 +47,10 @@
        :ascending "descending"
        :descending "ascending")]]
    (ez/for
-    [{:db/id item
-      [title done] :item/attrs}
-     (or (= true show-done)
-         (= false done))]
+    (and {:db/id item
+          [title done] :item/attrs}
+      (or (= true show-done)
+        (= false done)))
     #_[[item :item/title title]
        [item :item/done done]
        (= done show-done)]
@@ -65,11 +65,11 @@
                :on-change [[:db/add item :item/done (not done)]]}]
       [:span
        [:span {:on-click (when (not editing) [{:db/id self ::editing true ::working-title title}])}
-        (ez/for [(= editing false)] title)
-        (ez/for [(= editing true)]
-          [:input {:value working-title
-                   :on-change [[:db/add self ::working-title (-> % .-target .-value)]]
-                   :on-blur (on-blur self item working-title)}])]
+        (ez/for (= editing false) title)
+        (ez/for (= editing true)
+         [:input {:value working-title
+                  :on-change [[:db/add self ::working-title (-> % .-target .-value)]]
+                  :on-blur (on-blur self item working-title)}])]
        [:button
         {:on-click (doto [[:db/retractEntity item]] prn)}
         "X"]]])])
