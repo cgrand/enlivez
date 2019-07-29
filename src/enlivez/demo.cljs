@@ -46,6 +46,21 @@
      (case order
        :ascending "descending"
        :descending "ascending")]]
+   (ez/for (not (and {:db/id item
+                      [title done] :item/attrs}
+                  (or (= true show-done)
+                    (= false done))))
+     ; when nothing to display
+     (ez/for {:db/id item
+              [title done] :item/attrs}
+       ; but still some done items
+       [:li [:i "Do you want to see "
+             [:a {:href "#" :on-click (do (.preventDefault %) [[:db/add self ::show-done true]])}
+              "all you've already achieved?"]]])
+     (ez/for (not {:db/id item
+                   [title done] :item/attrs})
+       ; really nothing
+       [:li [:i "Time to write down some tasks!"]]))
    (ez/for
     (and {:db/id item
           [title done] :item/attrs}
