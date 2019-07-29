@@ -302,17 +302,17 @@
                          rows)
                 paths- (into #{}
                          (comp
-                         (remove rows)
-                           (map path-fn)
-                           (keep (fn [path]
-                                   (let [k (pop path)]
-                                     (when-not (contains? paths+ k) (conj k false))))))
+                          (remove rows)
+                          (map path-fn)
+                          (keep (fn [path]
+                                  (let [k (pop path)]
+                                    (when-not (contains? paths+ k) (conj k false))))))
                          prev-rows)
                 delta (into paths- (map (fn [[_ path]] (conj path true))) paths+)]
             (reset! aprev-rows rows)
             (when (not= #{} delta)
               #_(prn 'Q q)
-              (prn 'DELTA delta)
+              #_(prn 'DELTA delta)
               (f delta)))))}]))
 
 (defn mount [template elt]
@@ -386,13 +386,13 @@
 ;; IO
 (defn io-trigger*
   ([q binding send]
-    (io-trigger* q binding send (constantly nil)))
+   (io-trigger* q binding send (constantly nil)))
   ([q binding send stop]
-    (let [tx! #(d/transact! conn %)]
-      (tx!
-        (subscription [[q binding] [[] []]]
-          (fn [delta]
-            (doseq [[tuple _ addition] delta]
-              (if addition
-                (apply send tuple)
-                (apply stop tuple)))))))))
+   (let [tx! #(d/transact! conn %)]
+     (tx!
+       (subscription [[q binding] [[] []]]
+         (fn [delta]
+           (doseq [[tuple _ addition] delta]
+             (if addition
+               (apply send tuple)
+               (apply stop tuple)))))))))
