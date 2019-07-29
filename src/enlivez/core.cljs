@@ -273,6 +273,8 @@
     [find where
      (fn [row] (into [] (map #(% row)) seg-fns))]))
 
+(def ^:dynamic *print-delta* false)
+
 (defn subscription
   "Returns transaction data.
    hq is a hierarchical query, that is a collection of pairs [q k]  where q is
@@ -288,7 +290,7 @@
   (let [[find where path-fn] (flatten-q hq)]
     [{::live-query (concat [:find] find [:where] where)
       ::prepared-live-query (q/prepare-query find where)
-      ::hierarchical-query hq
+     ::hierarchical-query hq
       ::handler
       (let [aprev-rows (atom #{})]
         (fn [rows]
@@ -311,8 +313,8 @@
                 delta (into paths- (map (fn [[_ path]] (conj path true))) paths+)]
             (reset! aprev-rows rows)
             (when (not= #{} delta)
-              #_(prn 'Q q)
-              (prn 'DELTA delta)
+              (when *print-delta*
+                (prn 'DELTA delta))
               (f delta)))))}]))
 
 (defn mount [template elt]
