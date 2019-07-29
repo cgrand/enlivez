@@ -295,15 +295,27 @@
              (if (m v) m (assoc! m v (count m))))]
     (persistent! (clause-vars clause rf (transient init)))))
 
-(defn prepare-query [find where-clauses]
-  (let [clause (cons 'and where-clauses)
-        indices (allocate-indices '{$ 0} clause)
-        find-indices (into [] (map indices) find)
-        n (count indices)
-        rf (fn [s ctx]
-             (conj! s (into [] (map #(aget ctx %)) find-indices)))
-        [xform bv] (clause-xform+bv clause indices '#{$})
-        rf (xform rf)] ; ok to reuse, rf and xform are stateless
-    (fn [db]
-      (let [ctx (doto (object-array n) (aset 0 db))]
-        (persistent! (rf (transient #{}) ctx))))))
+(defn prepare-query
+  ([find where-clauses]
+    (prepare-query find where-clauses []))
+  ([find where-clauses args]
+    (let [clause (cons 'and where-clauses)
+          indices (allocate-indices (zipmap (cons '$ args) (range)) clause)
+          find-indices (into [] (map indices) find)
+          n (count indices)
+          rf (fn [s ctx]
+               (conj! s (into [] (map #(aget ctx %)) find-indices)))
+          [xform bv] (clause-xform+bv clause indices (into #{'$} args))
+          rf (xform rf)] ; ok to reuse, rf and xform are stateless
+      (fn [db & argvals]
+        (when-not (= (count argvals) (count args))
+          (throw (ex-info (str "Unexpected arguments count to query. Expected " (count args) " got " (count argvals) ".")
+                   {:find find :where where-clauses
+                    :args args
+                    :actual-args argvals})))
+        (let [ctx (doto (object-array n) (aset 0 db))]
+          (loop [i 1 args (seq argvals)]
+            (when-some [[arg & args] args]
+              (aset ctx i arg)
+              (recur (inc i) args)))
+          (persistent! (rf (transient #{}) ctx)))))))

@@ -2,7 +2,8 @@
   (:refer-clojure :exclude [for])
   (:require [clojure.core :as clj]
     [cljs.analyzer :as ana]
-    [clojure.spec.alpha :as s]))
+    [clojure.spec.alpha :as s]
+    [enlivez.q :as q]))
 
 (defprotocol Template
   (get-schema [_])
@@ -367,6 +368,27 @@
      `(do
         ~@(map (fn [args+clauses] `(defrule ~rulename ~@args+clauses)) (cons args clauses)))
      ))
+
+(defmacro defhandler
+  "Defines a function suitable to be called in a handler expression.
+   This functions takes a query after the arguments vector (no var-args, no destructuring atm).
+   The body of the function will be evaluated for each match of the query.
+   Arguments are bound in the query.
+   All query vars are bound in the body."
+  [name args q & body]
+  ; TODO: support for desctructuring
+  (let [where (expand-query &env q)
+        vars (vec (used-vars `(do ~@body) (fresh-vars q {})))]
+    `(def ~(vary-meta name assoc ::handler true)
+       (let [q# '~where
+             vars# '~vars
+             pq# (q/prepare-query vars# q# '~args)]
+         (fn ~args
+           (mapcat
+             (fn [~vars]
+               (let [x# (do ~@body)]
+                 (if (or (nil? x#) (sequential? x#)) x# [x#])))
+             (pq# @@#'conn ~@args)))))))
 
 (defmacro io-trigger [q & body]
   (let [q (expand-query &env q)
