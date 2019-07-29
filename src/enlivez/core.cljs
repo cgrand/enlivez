@@ -245,7 +245,7 @@
   "Flattens a hierarchical query to a pair [actual-query f] where f
    is a function to map a row to a path."
   [hq]
-  (prn 'HQ hq)
+  #_(prn 'HQ hq)
   (let [[where find ks seg-fns]
         (reduce
           (fn [[where find ks seg-fns] [q k]]
