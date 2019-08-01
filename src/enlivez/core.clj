@@ -16,6 +16,13 @@
   (when-some [[_ n] (when (keyword? k) (re-matches #"_(.*)" (name k)))]
     (keyword (namespace k) n)))
 
+(defn keywordize [sym env]
+  (let [ns (some->>
+             (when-some [ns (namespace sym)]
+               (or (ana/resolve-ns-alias env ns nil) (ana/resolve-macro-ns-alias env ns)))
+             name)]
+    (keyword (or ns (name (ns-name *ns*))) (name sym))))
+
 (defn unsugar-query-map [env qmap]
   {:defaults (into {}
                (keep
@@ -32,11 +39,7 @@
                (cond
                  (and (= :or v) (map? k)) nil
                  (symbol? k)
-                 (let [ns (some->>
-                            (when-some [ns (namespace k)]
-                              (or (ana/resolve-ns-alias env ns nil) (ana/resolve-macro-ns-alias env ns)))
-                            name)]
-                   [(keyword (or ns (name (ns-name *ns*))) (name k)) (symbol (name k))]) ; auto keyword
+                 [(keywordize k env) (symbol (name k))] ; auto keyword
                  (and (keyword? v) (= "attrs" (name v)))
                  (into {}
                    (clj/for [x k]
@@ -300,18 +303,30 @@
         `(fragment-template ~body
            [~@(clj/for [[path child] children] [`'~path (emit-cljs child schema)])])))))
 
+(defn state-entity-map [env m]
+  (into {}
+    (map (fn [[k v]]
+           [(if (symbol? k) (keywordize k env) k)
+            (cond
+              (map? v) (state-entity-map env v)
+              (vector? v) (into [] (map #(if (map? %) (state-entity-map env %) %)) v)
+              :else v)]))
+    m))
+
 (defn state [env known-vars state-map body options]
-  (let [eid (:db/id state-map '_)
+  (let [state-entity (state-entity-map env state-map)
+        eid (:db/id state-entity '_)
         known-vars (case eid
                      _ known-vars
                      (assoc known-vars eid (gensym eid)))
-        child (fragment* env known-vars body options)
-        state-map (assoc state-map :db/id (known-vars eid '_))]
+        state-entity (dissoc state-entity :db/id)
+        args (vec (used-vars state-entity known-vars))
+        child (fragment* env known-vars body options)]
     (reify Template
       (get-schema [_] (get-schema child))
       (emit-cljs [_ schema]
         ; TODO state-map may be expression (at least values)
-        `(state-template '~state-map ~(emit-cljs child schema))))))
+        `(state-template '~(known-vars eid '_) '~(mapv known-vars args) (fn [~args] ~state-entity) ~(emit-cljs child schema))))))
 
 (defmacro ^:private if-valid
   ([bindings+spec+value then] `(if-valid ~bindings+spec+value ~then nil))

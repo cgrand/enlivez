@@ -157,18 +157,23 @@
     (ensure! [c ks] (ump! (f (peek ks))) nil)
     (delete! [c] nil)))
 
-(defn state-component [state-map child ump! [parent-flat-k flat-k]]
-  (transact-right-after! [(assoc state-map :db/id -1 ::key flat-k)
-                    [:db/add [::key parent-flat-k] ::child -1]])
-  (let [child (instantiate! child ump! [flat-k (conj flat-k 1337)])]
+(defn state-component [state-f child ump! [parent-flat-k flat-k]]
+  (transact-right-after! [{:db/id -1 ::key flat-k}
+                          [:db/add [::key parent-flat-k] ::child -1]])
+  (let [vchild (volatile! nil)]
     (reify
       ILookup
-      (-lookup [c k] child)
+      (-lookup [c k] @vchild)
       Component
-      (ensure! [c ks] child)
+      (ensure! [c ks]
+        (or @vchild
+          (let [[eid & args] (peek ks)]
+            (prn 'ENSKS eid args)
+            (transact-right-after! [(assoc (state-f args) :db/id eid)])
+            (vreset! vchild (instantiate! child ump! [flat-k (conj flat-k :/)])))))
       (delete! [c]
         (try
-          (delete! child)
+          (delete! @vchild)
           (finally
             (d/transact! conn [[:db/retract [::key parent-flat-k] ::child [::key flat-k]]
                                [:db/retractEntity [::key flat-k]]])))))))
@@ -199,15 +204,19 @@
     (instantiate! [t mount! ks]
       (terminal-component f mount! ks))))
 
-(defn state-template [state-map child]
-  (let [eid (:db/id state-map '_)]
-    (reify
-      Template
-      (additional-schema [t] {})
-      (query-tree [t whole-schema]
-        {[#_[] (list `ensure-state (gensym "sk") eid) 1337 #_[#_"state-map args go there"]] (query-tree child whole-schema)})
-      (instantiate! [t mount! ks]
-        (state-component state-map child mount! ks)))))
+(defn state-template [eid args state-entity-f child]
+  (prn 'ARGS args)
+  (reify
+    Template
+    (additional-schema [t] {})
+    (query-tree [t whole-schema]
+      {[#_[] (list `ensure-state eid)
+        (into [eid] args)] (assoc
+                             (query-tree child whole-schema)
+                             [[] nil] nil)})
+    (instantiate! [t mount! ks]
+      (prn 'KS ks)
+      (state-component state-entity-f child mount! ks))))
 
 (defn include-template [clauses child]
   (reify
@@ -230,7 +239,6 @@
 (defn- flatten-hq
   "interim fn to map from query trees to hierarchical queries"
   [qt]
-  (prn 'QT qt)
   (or
     (seq (clj/for [[k v] qt
                    q (flatten-hq v)]
@@ -241,13 +249,14 @@
   "Flattens a hierarchical query to a pair [actual-query f] where f
    is a function to map a row to a path."
   [hq]
-  (prn 'HQ hq)
   (let [[where find ks seg-fns]
         (reduce
           (fn [[where find ks seg-fns] [q k]]
-            (let [q (if (= `ensure-state (first q))
-                      (let [[_ ?sk eid] q]
-                        [[(cons 'vector ks) ?sk] [eid ::key ks]])
+            (let [is-state (= `ensure-state (first q))
+                  q (if is-state
+                      (let [[_ eid & clauses] q
+                            ?sk (gensym "?sk")]
+                        (into [[(cons 'vector ks) ?sk] [eid ::key ?sk]] clauses))
                       q)
                   seg-fn (cond
                            (nil? k) nil
@@ -258,7 +267,7 @@
                              #(into [] (subvec % from to))))] ; https://clojure.atlassian.net/browse/CLJS-3092
               [(into where q)
                (into find (if (number? k) nil k))
-               (into ks (if (number? k) [k] k))
+               (into ks (cond is-state [:/] (number? k) [k] :else k))
                (cond-> seg-fns seg-fn (conj seg-fn))]))
           [[] [] [] []] hq)
         [find where]
@@ -284,13 +293,13 @@
    Upon transaction of the subscription, f receives a first delta (positive only) representing the current state."
   [hq f]
   (let [[find where path-fn] (flatten-q hq)]
-    (prn 'FIND find where)
     [{::live-query (concat [:find] find [:where] where)
       ::prepared-live-query (q/prepare-query find where)
-     ::hierarchical-query hq
+      ::hierarchical-query hq
       ::handler
       (let [aprev-rows (atom #{})]
         (fn [rows]
+          (prn 'FIND find 'WHERE where)
           (prn 'ROWS rows)
           (let [prev-rows @aprev-rows
                 ; I could also use a flat sorted map with the right order
@@ -320,7 +329,7 @@
         schema (let [db @conn]
                  (doto (into (:schema db) (additional-schema template))
                    (->> (d/init-db (d/datoms db :eavt)) (d/reset-conn! conn))))
-        {root-eid -1} (:tempids (d/transact! conn [[:db/add -1 ::key []]]))
+        #_#_{root-eid -1} (:tempids (d/transact! conn [[:db/add -1 ::key []]]))
         [component txs] (binding [*reentrant* []]
                           [(instantiate! template #(reset! dom %) [[] []]) *reentrant*])
         update! (fn [delta]
