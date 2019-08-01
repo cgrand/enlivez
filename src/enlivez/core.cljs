@@ -325,7 +325,7 @@
         schema (let [db @conn]
                  (doto (into (:schema db) (additional-schema template))
                    (->> (d/init-db (d/datoms db :eavt)) (d/reset-conn! conn))))
-        #_#_{root-eid -1} (:tempids (d/transact! conn [[:db/add -1 ::key []]]))
+        {root-eid -1} (:tempids (d/transact! conn [[:db/add -1 ::key []]]))
         [component txs] (binding [*reentrant* []]
                           [(instantiate! template #(reset! dom %) [[] []]) *reentrant*])
         update! (fn [delta]
