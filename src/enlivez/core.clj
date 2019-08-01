@@ -306,6 +306,8 @@
 (defn state-entity-map [env m]
   (into {}
     (map (fn [[k v]]
+           (when-not (or (symbol? k) (keyword? k))
+             (throw (ex-info "Invalid state-map, please report." {:m m})))
            [(if (symbol? k) (keywordize k env) k)
             (cond
               (map? v) (state-entity-map env v)
@@ -313,15 +315,43 @@
               :else v)]))
     m))
 
+(defn state-query-map [env m]
+  (into {}
+    (keep (fn [[k v]]
+            (cond
+              (symbol? k)
+              [(keywordize k env) (if (map? v)
+                                    (state-query-map env (assoc v :db/id (symbol (name k))))
+                                    (symbol (name k)))]
+              (keyword? k)
+              (when-some [m (when (map? v)
+                              (let [m (state-query-map env v)]
+                                (when (seq m) m)))]
+                [k m])
+              :else
+              (when-not (or (symbol? k) (keyword? k))
+                (throw (ex-info "Invalid state-map, please report." {:m m}))))))
+    m))
+
+(declare for)
+
 (defn state [env known-vars state-map body options]
   (let [state-entity (state-entity-map env state-map)
+        state-query (state-query-map env state-map)
+        state-query (when (seq state-query) state-query)
         eid (:db/id state-entity '_)
+        eid (if (and state-query (= '_ eid))
+              'state-eid
+              eid)
         known-vars (case eid
                      _ known-vars
                      (assoc known-vars eid (gensym eid)))
+        state-query (some-> state-query (assoc :db/id eid))
         state-entity (dissoc state-entity :db/id)
         args (vec (used-vars state-entity known-vars))
-        child (fragment* env known-vars body options)]
+        child (if state-query
+                (apply for env known-vars state-query body)
+                (fragment* env known-vars body options))]
     (reify Template
       (get-schema [_] (get-schema child))
       (emit-cljs [_ schema]
@@ -344,9 +374,9 @@
 
 (defn fragment [env known-vars & body]
   (if-valid [{:keys [body options]} ::fragment-body body]
-    (let [{qmap :state :as options} (into {} (map (juxt :key :value)) options)]
-      (if qmap
-        (state env known-vars qmap body options)
+    (let [{state-map :state :as options} (into {} (map (juxt :key :value)) options)]
+      (if state-map
+        (state env known-vars state-map body (dissoc options :state))
         (fragment* env known-vars body options)))
     (throw (ex-info "Invalid body" {:body body}))))
 

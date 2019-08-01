@@ -168,15 +168,13 @@
       (ensure! [c ks]
         (or @vchild
           (let [[eid & args] (peek ks)]
-            (prn 'ENSKS eid args)
             (transact-right-after! [(assoc (state-f args) :db/id eid)])
             (vreset! vchild (instantiate! child ump! [flat-k (conj flat-k :/)])))))
       (delete! [c]
         (try
           (delete! @vchild)
           (finally
-            (d/transact! conn [[:db/retract [::key parent-flat-k] ::child [::key flat-k]]
-                               [:db/retractEntity [::key flat-k]]])))))))
+            (d/transact! conn [[:db/retractEntity [::key flat-k]]])))))))
 
 (defn for-template [q ks sort-ks sort-f child]
   (reify  Template
@@ -205,7 +203,6 @@
       (terminal-component f mount! ks))))
 
 (defn state-template [eid args state-entity-f child]
-  (prn 'ARGS args)
   (reify
     Template
     (additional-schema [t] {})
@@ -215,7 +212,6 @@
                              (query-tree child whole-schema)
                              [[] nil] nil)})
     (instantiate! [t mount! ks]
-      (prn 'KS ks)
       (state-component state-entity-f child mount! ks))))
 
 (defn include-template [clauses child]
@@ -278,7 +274,7 @@
     [find where
      (fn [row] (into [] (map #(% row)) seg-fns))]))
 
-(def ^:dynamic *print-delta* true)
+(def ^:dynamic *print-delta* false)
 
 (defn subscription
   "Returns transaction data.
@@ -299,7 +295,7 @@
       ::handler
       (let [aprev-rows (atom #{})]
         (fn [rows]
-          (prn 'FIND find 'WHERE where)
+#_#_        (prn 'FIND find 'WHERE where)
           (prn 'ROWS rows)
           (let [prev-rows @aprev-rows
                 ; I could also use a flat sorted map with the right order
