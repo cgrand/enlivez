@@ -300,17 +300,18 @@
         `(fragment-template ~body
            [~@(clj/for [[path child] children] [`'~path (emit-cljs child schema)])])))))
 
-(defn state [env known-vars qmap body options]
-  (let [{:keys [eid clauses]} (expand-query-map env qmap)
-        known-vars (into known-vars
-                     (assoc (fresh-vars clauses {}) ; empty known-vars because :state must not filter
-                       eid (gensym eid)))
-        clauses (map #(apply-aliases % known-vars) clauses)
-        child (fragment* env known-vars body options)]
+(defn state [env known-vars state-map body options]
+  (let [eid (:db/id state-map '_)
+        known-vars (case eid
+                     _ known-vars
+                     (assoc known-vars eid (gensym eid)))
+        child (fragment* env known-vars body options)
+        state-map (assoc state-map :db/id (known-vars eid '_))]
     (reify Template
       (get-schema [_] (get-schema child))
       (emit-cljs [_ schema]
-        `(state-template '(ensure-state ~(gensym "sk") ~(known-vars eid) ~clauses) ~(emit-cljs child schema))))))
+        ; TODO state-map may be expression (at least values)
+        `(state-template '~state-map ~(emit-cljs child schema))))))
 
 (defmacro ^:private if-valid
   ([bindings+spec+value then] `(if-valid ~bindings+spec+value ~then nil))

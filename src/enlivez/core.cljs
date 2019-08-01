@@ -11,8 +11,11 @@
 
 #_(def ^:private rules-registry (atom {}))
 
-;; *reentrant* doubles as a cache for newly allocated state eids
+;; *reentrant* doubles as a queue of pending tx
 (def ^:private ^:dynamic *reentrant* nil)
+
+(defn transact-right-after! [tx]
+  (set! *reentrant* (conj *reentrant* tx)))
 
 ;; Datasource is only accessible through subscription
 (def ^:private conn
@@ -23,9 +26,13 @@
     (d/listen! ::meta-subscriber
       (fn [{:keys [tx-data db-after]}]
         (when-not *reentrant*
-          (binding [*reentrant* {}]
-            (doseq [[eid q f pq] (d/q '[:find ?eid ?q ?f ?pq :where [?eid ::live-query ?q] [?eid ::prepared-live-query ?pq] [?eid ::handler ?f]] db-after)]
-              (f (pq db-after)))))))))
+          (let [pending-txs
+                (binding [*reentrant* []]
+                  (doseq [[eid q f pq] (d/q '[:find ?eid ?q ?f ?pq :where [?eid ::live-query ?q] [?eid ::prepared-live-query ?pq] [?eid ::handler ?f]] db-after)]
+                    (f (pq db-after)))
+                  *reentrant*)]
+            (doseq [tx pending-txs]
+              (d/transact! conn tx))))))))
 
 (defn call-with-db [db f this e]
   (let [tx (.call f this e db)]
@@ -150,16 +157,15 @@
     (ensure! [c ks] (ump! (f (peek ks))) nil)
     (delete! [c] nil)))
 
-(defn state-component [child ump! [parent-flat-k flat-k]]
-  (d/transact! conn [[:db/add -1 ::key flat-k]
-                     [:db/add [::key parent-flat-k] ::child -1]])
-  (let [child (instantiate! child ump! [flat-k (conj flat-k '/)])]
+(defn state-component [state-map child ump! [parent-flat-k flat-k]]
+  (transact-right-after! [(assoc state-map :db/id -1 ::key flat-k)
+                    [:db/add [::key parent-flat-k] ::child -1]])
+  (let [child (instantiate! child ump! [flat-k (conj flat-k 1337)])]
     (reify
       ILookup
-      (-lookup [c k] (-lookup child k))
+      (-lookup [c k] child)
       Component
-      (ensure! [c ks]
-        (ensure! child ks))
+      (ensure! [c ks] child)
       (delete! [c]
         (try
           (delete! child)
@@ -193,14 +199,15 @@
     (instantiate! [t mount! ks]
       (terminal-component f mount! ks))))
 
-(defn state-template [entity-q child]
-  (reify
-    Template
-    (additional-schema [t] {})
-    (query-tree [t whole-schema]
-      {[entity-q nil] (query-tree child whole-schema)})
-    (instantiate! [t mount! ks]
-      (state-component child mount! ks))))
+(defn state-template [state-map child]
+  (let [eid (:db/id state-map '_)]
+    (reify
+      Template
+      (additional-schema [t] {})
+      (query-tree [t whole-schema]
+        {[#_[] (list `ensure-state (gensym "sk") eid) 1337 #_[#_"state-map args go there"]] (query-tree child whole-schema)})
+      (instantiate! [t mount! ks]
+        (state-component state-map child mount! ks)))))
 
 (defn include-template [clauses child]
   (reify
@@ -220,21 +227,10 @@
     [(into [(first x)] (mapcat simplify (rest x)))]
     :else (mapcat simplify x)))
 
-(q/register-fn `ensure-state-id
-  (fn [db k]
-    (or (*reentrant* k)
-      (let [eid (if-some [datom (first (d/datoms db :avet ::key k))]
-                  (.-e datom)
-                  (-> conn
-                    (d/transact! [[:db/add -1 ::key k]])
-                    :tempids
-                    (get -1)))]
-        (set! *reentrant* (assoc *reentrant* k eid))
-        eid))))
-
 (defn- flatten-hq
   "interim fn to map from query trees to hierarchical queries"
   [qt]
+  (prn 'QT qt)
   (or
     (seq (clj/for [[k v] qt
                    q (flatten-hq v)]
@@ -250,8 +246,8 @@
         (reduce
           (fn [[where find ks seg-fns] [q k]]
             (let [q (if (= `ensure-state (first q))
-                      (let [[_ ?sk eid clauses] q]
-                        (list* [(cons 'vector ks) ?sk] [(list `ensure-state-id '$ ?sk) eid] clauses))
+                      (let [[_ ?sk eid] q]
+                        [[(cons 'vector ks) ?sk] [eid ::key ks]])
                       q)
                   seg-fn (cond
                            (nil? k) nil
@@ -273,7 +269,7 @@
     [find where
      (fn [row] (into [] (map #(% row)) seg-fns))]))
 
-(def ^:dynamic *print-delta* false)
+(def ^:dynamic *print-delta* true)
 
 (defn subscription
   "Returns transaction data.
@@ -288,12 +284,14 @@
    Upon transaction of the subscription, f receives a first delta (positive only) representing the current state."
   [hq f]
   (let [[find where path-fn] (flatten-q hq)]
+    (prn 'FIND find where)
     [{::live-query (concat [:find] find [:where] where)
       ::prepared-live-query (q/prepare-query find where)
      ::hierarchical-query hq
       ::handler
       (let [aprev-rows (atom #{})]
         (fn [rows]
+          (prn 'ROWS rows)
           (let [prev-rows @aprev-rows
                 ; I could also use a flat sorted map with the right order
                 paths+ (into {}
@@ -323,7 +321,8 @@
                  (doto (into (:schema db) (additional-schema template))
                    (->> (d/init-db (d/datoms db :eavt)) (d/reset-conn! conn))))
         {root-eid -1} (:tempids (d/transact! conn [[:db/add -1 ::key []]]))
-        component (instantiate! template #(reset! dom %) [[] []])
+        [component txs] (binding [*reentrant* []]
+                          [(instantiate! template #(reset! dom %) [[] []]) *reentrant*])
         update! (fn [delta]
                   (doseq [path delta
                           :let [upsert (peek path)
@@ -332,6 +331,7 @@
                     (f component path)))
         subscriptions (vec (mapcat #(subscription % update!) (flatten-hq (query-tree template schema))))]
     (d/transact! conn subscriptions)
+    (doseq [tx txs] (d/transact! conn tx))
     (r/render [#(first (simplify @dom))] elt)))
 
 ;; Sorting
