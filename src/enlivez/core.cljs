@@ -227,6 +227,10 @@
 
 (defn simplify [x]
   (cond
+    (map? x) [(into {}
+                (remove (fn [[k v]]
+                          (and (sequential? v) (empty? v))))
+                x)]
     (not (sequential? x)) [x]
     (and (vector? x) (keyword? (first x)))
     [(into [(first x)] (mapcat simplify (rest x)))]
