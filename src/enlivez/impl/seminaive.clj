@@ -129,25 +129,6 @@
     bindings
     (map vector pat tuple)))
 
-(comment
-  (defn eval-rule [db [[op & head-args] & clauses]]
-    (letfn [(eval-clauses [bindings clauses]
-              (if-some [[[op & args] & more-clauses] (seq clauses)]
-                (case op
-                  not (TODO "not clause evaluation")
-                  (let [rel (db op)]
-                    (mapcat #(eval-clauses % more-clauses) (keep #(match bindings args %) rel))))
-                [(map bindings head-args)]))]
-      (eval-clauses {} clauses)))
-  
-  (defn eval-rule [db [[op & head-args] & clauses]]
-    (letfn [(eval-clause [bindings-seq [op & args]]
-              (case op
-                not (TODO "not clause evaluation")
-                (let [rel (db op)]
-                  (mapcat (fn [bindings] (keep #(match bindings args %) rel)) bindings-seq))))]
-      (map #(map % head-args) (reduce eval-clause [{}] clauses)))))
-
 (defn eval-rule [db [[op & head-args] & clauses]]
   (letfn [(eval-clause [bindings-seq [op & args]]
             (case op
