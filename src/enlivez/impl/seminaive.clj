@@ -142,11 +142,14 @@
         db (into db
              (map (fn [op]
                     {op #{}
-                     [:prev op] #{}}))
+                     [:prev op] #{}
+                     [:delta op] #{}}))
              rec-rels)
         db (transduce
              (map (fn [[[op] :as rule]]
-                    {[:delta op] (set (eval-rule db rule))}))
+                    (let [rel (set (eval-rule db rule))]
+                      {op rel
+                       [:delta op] rel})))
              (partial merge-with into) db seed)]
     (loop [db db]
       (let [delta-db (transduce
