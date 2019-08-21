@@ -78,6 +78,97 @@
         ; postpone deref until side effects from above are done
         (lazy-seq @new-rules)))))
 
+(defn deps
+  "To be used after all lifting is done."
+  [rules]
+  (reduce
+    (fn [m [k v]]
+      (update m k (fnil conj #{}) v))
+    {}
+    (for [[[rel] & clauses] rules
+         [op x] clauses]
+     [rel (if (= 'not op) (first x) op)])))
+
+(defn negations
+  "To be used after all lifting is done."
+  [rules]
+  (into #{}
+    (for [[[rel] & clauses] rules
+         [op x] clauses
+         :when (= 'not op)]
+     [rel (first x)])))
+
+;; stratify
+(defn sccs
+  "Returns the strongly connected components of a graph specified by its nodes
+   and a successor function succs from node to nodes.
+   The used algorithm is Tarjan's one."
+  [nodes succs]
+  (letfn [(sc [env node]
+            ; env is a map from nodes to stack length or nil,
+            ; nil means the node is known to belong to another SCC
+            ; there are two special keys: ::stack for the current stack 
+            ; and ::sccs for the current set of SCCs
+            (if (contains? env node)
+              env
+              (let [stack (::stack env)
+                    n (count stack)
+                    env (assoc env node n ::stack (conj stack node))
+                    env (reduce (fn [env succ]
+                                  (let [env (sc env succ)]
+                                    (assoc env node (min (or (env succ) n) (env node)))))
+                          env (succs node))]
+                (if (= n (env node)) ; no link below us in the stack, call it a SCC
+                  (let [nodes (::stack env)
+                        scc (set (take (- (count nodes) n) nodes))
+                        ; clear all stack lengths for these nodes since this SCC is done
+                        env (reduce #(assoc %1 %2 nil) env scc)]
+                    (assoc env ::stack stack ::sccs (conj (::sccs env) scc)))
+                  env))))]
+    (::sccs (reduce sc {::stack () ::sccs #{}} nodes))))
+
+(defn scc-graph [sccs nodes succs]
+  (let [node->scc (into {} (for [scc sccs node scc] [node scc]))]
+    (reduce
+      (fn [m [k v]]
+        (update m k (fnil conj #{}) v))
+      {}
+      (for [scc sccs
+           node scc
+           :let [from (node->scc node)]
+           node' (succs node)
+           :let [to (node->scc node')]
+           :when (not= from to)]
+       [from to]))))
+
+(defn topo-sort [nodes succs]
+  (letfn [(xf [rf]
+            (let [seen (volatile! #{})]
+              (fn self
+                ([acc] (rf acc))
+                ([acc node]
+                  (if (@seen node)
+                    acc
+                    (do
+                      (vswap! seen conj node)
+                      (let [acc (reduce self acc (succs node))]
+                        (cond-> acc (not (reduced? acc)) (rf node)))))))))]
+    (eduction xf nodes)))
+
+(defn stratify
+  "To be used after all lifting is done."
+  [rules]
+  (let [graph (deps rules)
+        negations (negations rules)
+        sccs (sccs (keys graph) graph)
+        _ (doseq [scc sccs a scc b scc :when (negations [a b])]
+            (throw (ex-info "Unstratifiable" {:a a :b b})))
+        scc-graph (scc-graph sccs (keys graph) graph)
+        sorted-sccs (topo-sort sccs scc-graph)
+        rules-by-rel (group-by ffirst rules)]
+    (keep #(seq (mapcat rules-by-rel %)) sorted-sccs)))
+
+
 (defn seminaive-step
   [rules scc]
   (let [; keep only relevant rules
@@ -171,6 +262,9 @@
             (fn [db op] (dissoc db [:prev db] [:delta db]))
             db rec-rels))))))
 
+(defn eval-pgm [db strata]
+  (reduce eval-naive-step db strata))
+
 (defn scc-kind [scc rules-by-name sccs-graph]
   (let [n (reduce
            (fn [m n]
@@ -196,3 +290,29 @@
       1 :linear
       2 :non-linear
       3 :non-stratified-negation)))
+
+(defn unwind [v->u u<-v v<-u u v]
+  (loop [v->u (assoc v->u v u) u u]
+    (if-some [v (u<-v u)]
+      (let [u (v<-u v)]
+        (recur (assoc v->u v u) u))
+      [u v->u])))
+
+(defn hopcroft-karp
+  ([u->vs] (hopcroft-karp (set (keys u->vs)) u->vs))
+  ([us u->vs]
+    (loop [v->u {} u<-v {} v<-u {} lvl us us us]
+      (if-some [[u v] (some (fn [u] (some (fn [v] (when (nil? (v->u v)) [u v])) (u->vs u))) lvl)]
+        (let [[u v->u] (unwind v->u u<-v v<-u u v)
+              us (disj us u)]
+          (recur v->u {} {} us us))
+        (if (seq lvl)
+          (let [dv<-u (into {} (for [u lvl v (u->vs u) :when (-> v v->u u<-v nil?)] [v u]))
+               lvl (map v->u (vals dv<-u))
+               v<-u (into v<-u dv<-u)
+               u<-v (into {} (for [v (keys dv<-u)] [(v->u v) v]))]
+           (recur v->u u<-v v<-u lvl us))
+          v->u)))))
+
+
+ 
