@@ -273,6 +273,16 @@
 (defn eval-rules [db rules]
   (eval-seminaive-strata db (map seminaive-stratum (stratify rules))))
 
+(defn required-indexes [[[pred & args] & clauses]]
+  (first
+    (reduce (fn [[indexes bound-vars] [pred & args]]
+              (if (= 'not pred)
+                (recur [indexes bound-vars] (first args))
+                [(update indexes pred (fnil conj #{})
+                   (into #{} (keep-indexed (fn [i arg] (when (bound-vars arg) i))) args))
+                 (-> bound-vars (into (filter symbol?) args) (disj '_))]))
+      [{} #{}] clauses)))
+
 (defn unwind [v->u u<-v v<-u u v]
   (loop [v->u (assoc v->u v u) u u]
     (if-some [v (u<-v u)]
@@ -283,18 +293,41 @@
 (defn hopcroft-karp
   ([u->vs] (hopcroft-karp (set (keys u->vs)) u->vs))
   ([us u->vs]
+    ; v->u is the WIP matching
+    ; u<-v and v<-u are the edges traversed so far
     (loop [v->u {} u<-v {} v<-u {} lvl us us us]
       (if-some [[u v] (some (fn [u] (some (fn [v] (when (nil? (v->u v)) [u v])) (u->vs u))) lvl)]
         (let [[u v->u] (unwind v->u u<-v v<-u u v)
               us (disj us u)]
           (recur v->u {} {} us us))
         (if (seq lvl)
-          (let [dv<-u (into {} (for [u lvl v (u->vs u) :when (-> v v->u u<-v nil?)] [v u]))
-               lvl (map v->u (vals dv<-u))
-               v<-u (into v<-u dv<-u)
-               u<-v (into {} (for [v (keys dv<-u)] [(v->u v) v]))]
-           (recur v->u u<-v v<-u lvl us))
+          (let [; newly reachable v which already have a matching
+                dv<-u (into {} (for [u lvl, v (u->vs u)
+                                     :when (and (v->u v) (not (v<-u v)))]
+                                 [v u]))
+                lvl (map v->u (keys dv<-u))
+                v<-u (into v<-u dv<-u)
+                u<-v (into {} (for [v (keys dv<-u)] [(v->u v) v]))]
+            (recur v->u u<-v v<-u lvl us))
           v->u)))))
 
+(defn index-plan
+  "Takes required indexes (as a set of sets of indices) for a predicate and returns an index
+   plan as a map of sets of indices to ."
+  [indexes]
+  (let [inclusions (reduce
+                     (fn [order a]
+                       (assoc order a
+                         (-> #{}
+                           (into
+                             (filter #(every? a %))
+                             indexes)
+                           (disj a))))
+                     {} indexes)
+        matching (hopcroft-karp inclusions)
+        roots (remove (set (vals matching)) indexes)]
+    (map #(into [] (comp (take-while some?) (mapcat sort) (distinct)) (iterate matching %)) roots)))
 
- 
+(comment
+  => (index-plan [#{1} #{2} #{1 2} #{1 3} #{1 2 3}])
+  ([1 3 2] [2 1]))
