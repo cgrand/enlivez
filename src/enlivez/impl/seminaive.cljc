@@ -273,15 +273,19 @@
 (defn eval-rules [db rules]
   (eval-seminaive-strata db (map seminaive-stratum (stratify rules))))
 
-(defn required-indexes [[[pred & args] & clauses]]
-  (first
-    (reduce (fn [[indexes bound-vars] [pred & args]]
-              (if (= 'not pred)
-                (recur [indexes bound-vars] (first args))
-                [(update indexes pred (fnil conj #{})
-                   (into #{} (keep-indexed (fn [i arg] (when (bound-vars arg) i))) args))
-                 (-> bound-vars (into (filter symbol?) args) (disj '_))]))
-      [{} #{}] clauses)))
+(defn used-binding-profiles [rules]
+  (transduce
+    (map
+      (fn [[head & clauses]]
+        (first (reduce (fn
+                        [[indexes bound-vars] [pred & args]]
+                        (if (= 'not pred)
+                          (recur [indexes bound-vars] (first args))
+                          [(update indexes pred (fnil conj #{})
+                             (into #{} (keep-indexed (fn [i arg] (when (bound-vars arg) i))) args))
+                           (-> bound-vars (into (filter symbol?) args) (disj '_))]))
+                [{} #{}] clauses))))
+    (partial merge-with into) {} rules))
 
 (defn unwind [v->u u<-v v<-u u v]
   (loop [v->u (assoc v->u v u) u u]
@@ -312,21 +316,84 @@
           v->u)))))
 
 (defn index-plan
-  "Takes required indexes (as a set of sets of indices) for a predicate and returns an index
-   plan as a map of sets of indices to ."
-  [indexes]
+  "Takes binding profiles (as a set of sets of indices) for a predicate and
+   returns an index plan as collection of vector of indices."
+  [binding-profiles]
   (let [inclusions (reduce
                      (fn [order a]
                        (assoc order a
                          (-> #{}
                            (into
                              (filter #(every? a %))
-                             indexes)
+                             binding-profiles)
                            (disj a))))
-                     {} indexes)
+                     {} binding-profiles)
         matching (hopcroft-karp inclusions)
-        roots (remove (set (vals matching)) indexes)]
+        roots (remove (set (vals matching)) binding-profiles)]
     (map #(into [] (comp (take-while some?) (mapcat sort) (distinct)) (iterate matching %)) roots)))
+
+(defn available-bps
+  "For a given plan, returns a map of supported bps to indexing paths."
+  [plan]
+  (into {}
+    (for [path plan
+          prefix (iterate pop path)
+          :while (seq prefix)]
+      [(set prefix) path])))
+
+(defn indexes-conj
+  "returns a conj fn (taking a rel and a tuple, returning a rel)
+   for the given indexing plan."
+  [plan]
+  (letfn [(index-assoc [path]
+            (if-some [[i & is] (seq path)]
+              (let [subassoc (index-assoc is)
+                    default (if is {} #{})]
+                (fn [index tuple]
+                  (let [k (nth tuple i)
+                        subindex (get index k default)]
+                    (assoc index k (subassoc subindex tuple)))))
+              conj))]
+    (reduce (fn [further-assocs path]
+              (let [f (index-assoc path)]
+                (fn [rel tuple]
+                  (further-assocs (update rel path f tuple)))))
+      identity plan)))
+
+(defn index-lookup
+  "returns a lookup fn (taking a rel and a tuple, returning a collection of tuples)
+   for the given binding profile and index path (bp and path must be compatible)."
+  [bp path]
+  (let [ignored (- (count path) (count bp))
+        scan (reduce (fn [f _] #(mapcat f (vals %)))
+               identity (range ignored))
+        lookup (reduce (fn [f i]
+                         (fn [index tuple]
+                           (some-> (get index (nth tuple i)) (f tuple))))
+                 (fn [index _] (scan index)) (drop ignored (rseq path)))]
+    (fn [rel tuple]
+      (lookup (get rel path) tuple))))
+
+(defn rel ; TODO turns this in a proper collection
+  ([plan] ; no empty plan, no empty path
+    (let [m (zipmap plan (repeat {}))
+          lookups (into {}
+                    (for [[bp path] (cons [#{} (first plan)] (available-bps plan))]
+                      [bp (index-lookup bp path)]))
+          conj (indexes-conj plan)]
+      (rel m lookups conj)))
+  ([m lookups conj]
+    (fn self
+      ; 0-arg -> full scan
+      ([] (self #{} nil))
+      ; 1-arg -> conj
+      ([tuple] (rel (conj m tuple) lookups conj))
+      ; 2-arg -> indexed lookup
+      ([bp tuple]
+        (if-some [lkp (lookups bp)]
+          (lkp m tuple)
+          (throw (ex-info "Unsupported binding profile." {:bp bp :supported-bps (keys lookups)})))))))
+
 
 (comment
   => (index-plan [#{1} #{2} #{1 2} #{1 3} #{1 2 3}])
