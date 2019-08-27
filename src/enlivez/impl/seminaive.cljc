@@ -78,6 +78,24 @@
         ; postpone deref until side effects from above are done
         (lazy-seq @new-rules)))))
 
+(defn lift-keyword-preds
+  "Turn (:a e v) or (:_a v e) in (datom e :a v)."
+  [rules]
+  (for [[head & clauses] rules]
+    (cons head (map (fn self [[pred & args :as clause]]
+                      (cond
+                        (= 'not pred) (list 'not (self (first args)))
+                        (not (keyword? pred)) clause
+                        (.startsWith (name pred) "_")
+                        (let [[v e] args]
+                          (list 'datom e (keyword (namespace pred) (subs (name pred) 1)) v))
+                        :else
+                        (let [[e v] args]
+                          (list 'datom e pred v)))) clauses))))
+
+(defn lift-all [rules]
+  (-> rules lift-freshes lift-ors lift-keyword-preds))
+
 (defn deps
   "To be used after all lifting is done."
   [rules]
@@ -203,6 +221,17 @@
     {:init init-rules
      :delta delta-rules}))
 
+(defprotocol Rel
+  (lookup [rel bp] [rel bp tuple]))
+
+(extend-protocol Rel
+  clojure.lang.APersistentSet
+  (lookup [s bp] #(lookup s bp %))
+  (lookup [s bp tuple]
+    (for [item s
+          :when (every? #(= (nth item %) (nth tuple %)) bp)]
+      item)))
+
 (defn- match [bindings pat tuple]
   (reduce
     (fn [bindings [x v]]
@@ -224,7 +253,9 @@
   (letfn [(eval-clause [bindings-seq [op & args]]
             (case op
               not (remove #(seq (eval-clause [%] (first args))) bindings-seq)
-              (let [rel (db op)]
+              (let [rel (case op
+                          datom (d/datoms (db op) :eavt) ; brutal
+                          (db op))]
                 (mapcat (fn [bindings] (keep #(match bindings args %) rel)) bindings-seq))))]
     (map #(map % head-args) (reduce eval-clause [{}] clauses))))
 
@@ -273,18 +304,24 @@
 (defn eval-rules [db rules]
   (eval-seminaive-strata db (map seminaive-stratum (stratify rules))))
 
+(defn binding-profile [bound-vars [pred & args]]
+  (if (= 'not pred)
+    (recur bound-vars (first args))
+    (into #{} (keep-indexed (fn [i arg] (when (or (not (symbol? arg)) (bound-vars arg)) i))) args)))
+
 (defn used-binding-profiles [rules]
   (transduce
     (map
       (fn [[head & clauses]]
-        (first (reduce (fn
-                        [[indexes bound-vars] [pred & args]]
-                        (if (= 'not pred)
-                          (recur [indexes bound-vars] (first args))
-                          [(update indexes pred (fnil conj #{})
-                             (into #{} (keep-indexed (fn [i arg] (when (bound-vars arg) i))) args))
-                           (-> bound-vars (into (filter symbol?) args) (disj '_))]))
-                [{} #{}] clauses))))
+        (first
+          (reduce
+            (fn [[indexes bound-vars] [pred & args :as clause]]
+              [(update indexes pred (fnil conj #{})
+                 (binding-profile bound-vars clause))
+               (if (= 'not pred)
+                 bound-vars
+                 (-> bound-vars (into (filter symbol?) args) (disj '_)))] )
+           [{} #{}] clauses))))
     (partial merge-with into) {} rules))
 
 (defn unwind [v->u u<-v v<-u u v]
@@ -383,16 +420,91 @@
           conj (indexes-conj plan)]
       (rel m lookups conj)))
   ([m lookups conj]
-    (fn self
-      ; 0-arg -> full scan
-      ([] (self #{} nil))
-      ; 1-arg -> conj
-      ([tuple] (rel (conj m tuple) lookups conj))
-      ; 2-arg -> indexed lookup
-      ([bp tuple]
+    (reify
+      clojure.lang.Seqable
+      (seq [self] (seq (lookup self #{} nil)))
+      clojure.lang.IPersistentCollection
+      (cons [_ tuple]
+        (rel (conj m tuple) lookups conj))
+      (empty [_] (rel (zipmap (keys m) (repeat {})) lookups conj))
+      Rel
+      (lookup [rel bp]
+        (if-some [lkp (lookups bp)]
+          #(lkp m %)
+          (throw (ex-info "Unsupported binding profile." {:bp bp :supported-bps (keys lookups)}))))
+      (lookup [rel bp tuple]
         (if-some [lkp (lookups bp)]
           (lkp m tuple)
           (throw (ex-info "Unsupported binding profile." {:bp bp :supported-bps (keys lookups)})))))))
+
+(defn clause-xf [bound-vars [pred & args :as clause]]
+  (case (first clause)
+    not
+    (let [subxf (clause-xf bound-vars (first args))]
+      (fn [rf db]
+        (let [subrf (subxf (fn [_ _] (reduced false)) db)]
+          (fn [acc bindings]
+            (if (subrf true bindings)
+              (rf acc bindings)
+              acc)))))
+    (let [bp (binding-profile bound-vars clause)
+          tuple (object-array (count args))
+          args (vec args)
+          set-tuple!
+          (reduce-kv
+            (fn [f i arg]
+              (cond
+                (bound-vars arg)
+                (fn [bindings]
+                  (f bindings)
+                  (aset tuple i (bindings arg)))
+                (symbol? arg) f
+                :else ; constant
+                (fn [^objects tuple bindings]
+                  (f bindings)
+                  (aset tuple i arg))))
+            identity args)
+          outs (reduce-kv
+                 (fn [m i arg]
+                   (if (and (symbol? arg) (not= '_ arg) (not (bound-vars arg)))
+                     (assoc m arg (conj m arg []) i)
+                     m))
+                 {} args)
+          outf (reduce-kv
+                 (fn [f var [i & is]]
+                   (fn [bindings tuple]
+                     (let [val (nth tuple i)]
+                       (when (every? #(= val (nth tuple %)) is)
+                         (f (assoc bindings var val))))))
+                 (fn [bindings tuple] bindings)
+                 outs)]
+      ; TODO eq constraints when same var appears twice
+      (fn [rf db]
+        (let [lkp (lookup (db pred) bp)]
+          (fn [acc bindings]
+            (set-tuple! bindings)
+            (if-some [bindings (outf bindings )]
+              (reduce
+                (fn [acc tuple]
+                  (if-some [bindings (outf bindings tuple)]
+                    (rf acc bindings)
+                    acc))
+                acc (lkp tuple)))))))))
+
+#_(defn eval-rule [db [[pred & head-args] & clauses]]
+   (let [xfs
+         (first
+           (reduce
+             (fn [[xfs bound-vars] clause]
+               [(conj xfs (clause-xf bound-vars clause))
+                (-> bound-vars (into (filter symbol?) (next clause)) (disj '_))])
+             [[] #{}] clauses))]
+     (eduction
+       (fn [rf]
+         (reduce (fn [rf xf] (xf rf db))
+           (fn [acc bindings]
+             (rf acc (into [] (map bindings) head-args))) (rseq xfs)))
+       [{}])))
 
 
 (comment
