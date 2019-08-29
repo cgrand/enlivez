@@ -35,6 +35,23 @@
     (for [[head & clauses] rules]
       (cons head (map #(lift % {}) clauses)))))
 
+(defn- unnest
+  "If clause has nested expressions then unnest them (not recursively) else nil."
+  [[pred & args]]
+  (let [vclauses (volatile! [])
+        clause (into [pred]
+                 (map (fn [arg]
+                        (if (seq? arg)
+                          (let [ret (gensym "anon")
+                                arg' (into [] (map #({'% ret} % %)) arg)]
+                            (vswap! vclauses conj (cond-> arg' (= arg arg') (conj ret)))
+                            ret)
+                          arg)))
+                 args)
+        clauses @vclauses]
+    (when (seq clauses)
+      (conj clauses clause))))
+
 (defn lift-ors
   "Removes ors and complex nots (which somehow are ors -- think De Morgan)"
   [rules]
@@ -70,7 +87,9 @@
                                        :else ; only 1
                                        (cons 'not clauses)))]
                           (recur (into done nots) more-clauses)))
-                  (recur (conj done clause) more-clauses))
+                  (if-some [clauses (unnest clause)]
+                    (recur done (concat clauses more-clauses))
+                    (recur (conj done clause) more-clauses)))
                 [done]))]
       (concat
         (for [[head & clauses] rules
@@ -78,39 +97,6 @@
           (cons head clauses))
         ; postpone deref until side effects from above are done
         (lazy-seq @new-rules)))))
-
-#_(defn lift-value-expressions
-   [rules]
-   (letfn [(lift [[op & args :as clause] value-position]
-             (if (reserved? op)
-               (case op
-                 not (cons 'not
-                       (map #(lift % false) args)))
-
-               (let [subexprs (into {}
-                                (keep-indexed
-                                  (fn [i x]
-                                    (when (seq? x)
-                                      (let [ret (gensym '%)
-                                            x' (map #({'% ret} % %) x)
-                                            x (if (= x x') (concat x [ret]) x')]
-                                        [i [ret x]]))))
-                                args)]
-                 (if (seq subexprs)
-                   (concat ['and]
-                     (map (fn [[_ x]]
-                            (lift x false)) (vals subexprs))
-                     [(cons op
-                        (map-indexed
-                          (fn [i x]
-                            (if-some [ret (some-> (subexprs i) first)]
-                              ret
-                              x))
-                          args))])
-                   clause))))]
-     (lift-ors ; remove ands we just reintroduced
-       (for [[head & clauses] rules]
-         (cons head (map #(lift % false) clauses))))))
 
 (defn lift-keyword-preds
   "Turn (:a e v) or (:_a v e) in (datom e :a v)."

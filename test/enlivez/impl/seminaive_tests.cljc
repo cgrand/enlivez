@@ -46,12 +46,8 @@
                (lift-all
                  '[([? x' y'] (rsg x y) (:db/ident x x') (:db/ident y y'))
                    ([rsg x y] ;-
-                     (or (:flat x y)
-                       (and (:up x x1) (rsg y1 x1) (:down y1 y))))])))
-          '#{(:j :f) (:h :f) (:m :n) (:g :f) (:a :d) (:p :m) (:a :b) (:f :k) (:a :c) (:i :f) (:m :o)}))
-    #_'[([rsg x y] ;-
-         (or (:flat x y)
-           (rsg (:_down y) (:up x))))]))
+                     (or (:flat x y) (rsg (:_down y) (:up x))))])))
+          '#{(:j :f) (:h :f) (:m :n) (:g :f) (:a :d) (:p :m) (:a :b) (:f :k) (:a :c) (:i :f) (:m :o)}))))
 
 (deftest fnrel
   (let [r (rel [[1 0]])
