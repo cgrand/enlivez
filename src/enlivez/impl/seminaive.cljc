@@ -1,4 +1,5 @@
-(ns enlivez.impl.seminaive)
+(ns enlivez.impl.seminaive
+  (:require [datascript.core :as d]))
 
 (defn- TODO [s]
   (throw (ex-info (str "TODO: " s) {})))
@@ -77,6 +78,39 @@
           (cons head clauses))
         ; postpone deref until side effects from above are done
         (lazy-seq @new-rules)))))
+
+#_(defn lift-value-expressions
+   [rules]
+   (letfn [(lift [[op & args :as clause] value-position]
+             (if (reserved? op)
+               (case op
+                 not (cons 'not
+                       (map #(lift % false) args)))
+
+               (let [subexprs (into {}
+                                (keep-indexed
+                                  (fn [i x]
+                                    (when (seq? x)
+                                      (let [ret (gensym '%)
+                                            x' (map #({'% ret} % %) x)
+                                            x (if (= x x') (concat x [ret]) x')]
+                                        [i [ret x]]))))
+                                args)]
+                 (if (seq subexprs)
+                   (concat ['and]
+                     (map (fn [[_ x]]
+                            (lift x false)) (vals subexprs))
+                     [(cons op
+                        (map-indexed
+                          (fn [i x]
+                            (if-some [ret (some-> (subexprs i) first)]
+                              ret
+                              x))
+                          args))])
+                   clause))))]
+     (lift-ors ; remove ands we just reintroduced
+       (for [[head & clauses] rules]
+         (cons head (map #(lift % false) clauses))))))
 
 (defn lift-keyword-preds
   "Turn (:a e v) or (:_a v e) in (datom e :a v)."
@@ -224,13 +258,13 @@
 (defprotocol Rel
   (lookup [rel bp] [rel bp tuple]))
 
-(extend-protocol Rel
-  clojure.lang.APersistentSet
-  (lookup [s bp] #(lookup s bp %))
-  (lookup [s bp tuple]
-    (for [item s
-          :when (every? #(= (nth item %) (nth tuple %)) bp)]
-      item)))
+#_(extend-protocol Rel
+   clojure.lang.APersistentSet
+   (lookup [s bp] #(lookup s bp %))
+   (lookup [s bp tuple]
+     (for [item s
+           :when (every? #(= (nth item %) (nth tuple %)) bp)]
+       item)))
 
 (defn- match [bindings pat tuple]
   (reduce
@@ -249,13 +283,31 @@
     bindings
     (map vector pat tuple)))
 
-(defn eval-rule [db [[op & head-args] & clauses]]
-  (letfn [(eval-clause [bindings-seq [op & args]]
-            (case op
+(defn eval-rule [db [[head-pred & head-args] & clauses]]
+  (letfn [(eval-clause [bindings-seq [pred & args]]
+            (case pred
               not (remove #(seq (eval-clause [%] (first args))) bindings-seq)
-              (let [rel (case op
-                          datom (d/datoms (db op) :eavt) ; brutal
-                          (db op))]
+              call (let [f (first args)
+                         args (vec (next args))
+                         ret (peek args)
+                         args (pop args)]
+                     (keep
+                       (fn [bindings]
+                         (let [r (apply (bindings f f) (map #(bindings % %) args))]
+                           (cond
+                             (not (symbol? ret))
+                             (when (= r ret) bindings)
+
+                             (= '_ ret) bindings
+
+                             (contains? bindings ret)
+                             (when (= r (bindings ret)) bindings)
+
+                             :else (assoc bindings ret r))))
+                       bindings-seq))
+              (let [rel (case pred
+                          datom (d/datoms (db pred) :eavt) ; brutal
+                          (db pred))]
                 (mapcat (fn [bindings] (keep #(match bindings args %) rel)) bindings-seq))))]
     (map #(map % head-args) (reduce eval-clause [{}] clauses))))
 
@@ -421,12 +473,13 @@
       (rel m lookups conj)))
   ([m lookups conj]
     (reify
-      clojure.lang.Seqable
-      (seq [self] (seq (lookup self #{} nil)))
-      clojure.lang.IPersistentCollection
-      (cons [_ tuple]
+      #?(:clj clojure.lang.Seqable :cljs ISeqable)
+      (#?(:clj seq :cljs -seq) [self] (seq (lookup self #{} nil)))
+      #?(:clj clojure.lang.IPersistentCollection :cljs ICollection)
+      (#?(:clj cons :cljs -conj)  [_ tuple]
         (rel (conj m tuple) lookups conj))
-      (empty [_] (rel (zipmap (keys m) (repeat {})) lookups conj))
+      #?@(:cljs [IEmptyableCollection] :clj [])
+      (#?(:clj empty :cljs -empty) [_] (rel (zipmap (keys m) (repeat {})) lookups conj))
       Rel
       (lookup [rel bp]
         (if-some [lkp (lookups bp)]
