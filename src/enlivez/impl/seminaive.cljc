@@ -17,23 +17,21 @@
 
 ;; ok the goal here is to implement seminaive evaluation for a datalog program
 
-;; in order to get to textbook datalog, we need to perform the following steps:
-;; 1. remove freshes
-;; 2. remove ors (and remove complex not bodies)
+(defn flatten-map
+  "Returns a seq of clauses."
+  ([clause]
+    (let [id (or (:as clause) (gensym 'id))]
+      (flatten-map clause id)))
+  ([clause id]
+    (cons 'and
+      (for [[k v] (dissoc clause :as)]
+        (list k id v)))))
 
-(defn lift-freshes
-  "Remove freshes by renaming vars."
-  [rules]
-  (letfn [(lift [[op & args] aliases]
-            (if (reserved? op)
-              (case op
-                fresh (let [[fresh-vars & args] args
-                            aliases (into aliases (map (fn [v] [v (gensym v)])) fresh-vars)]
-                        (cons 'and (map #(lift % aliases) args)))
-                (and or not) (cons op (map #(lift % aliases) args)))
-              (cons op (map #(aliases % %) args))))]
-    (for [[head & clauses] rules]
-      (cons head (map #(lift % {}) clauses)))))
+(defn expand-kw-clause [[k & args] missing]
+  (if (.startsWith (name k) "_")
+    (let [k (keyword (namespace k) (subs (name k) 1))]
+      (list 'datom (nth args 1 missing) k (nth args 0)))
+    (list 'datom (nth args 0) k (nth args 1 missing))))
 
 (defn- unnest
   "If clause has nested expressions then unnest them (not recursively) else nil."
@@ -41,80 +39,81 @@
   (let [vclauses (volatile! [])
         clause (into [pred]
                  (map (fn [arg]
-                        (if (seq? arg)
-                          (let [ret (gensym "anon")
-                                arg' (into [] (map #({'% ret} % %)) arg)]
+                        (cond
+                          (seq? arg)
+                          (let [ret (gensym "ret")
+                                arg (cond-> arg (keyword? (first arg)) (expand-kw-clause '%))
+                                arg' (into [] (map (fn [x] ({'% ret} x x))) arg)]
                             (vswap! vclauses conj (cond-> arg' (= arg arg') (conj ret)))
                             ret)
-                          arg)))
+                          (map? arg)
+                          (let [id (or (:as arg) (gensym "ret-id"))]
+                            (vswap! vclauses conj (flatten-map arg id))
+                            id)
+                          :else arg)))
                  args)
         clauses @vclauses]
     (when (seq clauses)
       (conj clauses clause))))
 
-(defn lift-ors
-  "Removes ors and complex nots (which somehow are ors -- think De Morgan)"
+(defn lift-all
+  "Expand rules (which may contain nested expressions, ands, ors, nots or freshes) into
+   textbook datalog. Supplementary rules mays be created."
   [rules]
   (let [new-rules (atom [])]
     (letfn [(extract-rule! [clauses]
               (let [head (cons (gensym 'pre-or) (into #{} (mapcat used-vars) clauses))]
                 (swap! new-rules conj (cons head clauses))
                 head))
-            (lift [done clauses]
+            (lift [aliases done clauses]
               ; MUST returns a seq of vectors (if we have nested laziness 
               ; it will end bad)
               (if-some [[[op & args :as clause] & more-clauses] (seq clauses)]
-                (if (reserved? op)
+                (cond
+                  (map? clause)
+                  (recur aliases done (cons (flatten-map clause) more-clauses))
+                  (identical? lift op)
+                  (recur (first args) done more-clauses)
+                  (keyword? op)
+                  (recur aliases done (cons (expand-kw-clause clause '_) more-clauses))
+                  (reserved? op)
                   (case op
+                    fresh (let [[fresh-vars & scoped-clauses] args
+                                new-aliases (into aliases (for [v fresh-vars] [v (gensym v)]))]
+                            (recur new-aliases done (concat scoped-clauses
+                                                      (cons (list lift aliases) more-clauses))))
                     or (cond
                          (next args)
                          (let [done (case (count done)
                                       (0 1) done
                                       [(extract-rule! done)])]
-                           (mapcat #(lift done (cons % more-clauses)) args))
+                           (mapcat #(lift aliases done (cons % more-clauses)) args))
                          (seq args) ; only 1
-                         (recur done (concat args more-clauses))
+                         (recur aliases done (concat args more-clauses))
                          :else nil)
-                    and (recur done (concat args more-clauses))
-                    not (let [nots (for [clauses (lift [] args)]
+                    and (recur aliases done (concat args more-clauses))
+                    not (let [nots (for [clauses (lift aliases [] args)]
                                      (cond
                                        (next clauses)
                                        (list 'not (extract-rule! clauses))
                                        (reserved? (ffirst clauses))
                                        (let [[op & args] (first clauses)]
                                          (case op
-                                           not args))
+                                           not args)) ; pretty sure there are edge cases
                                        :else ; only 1
                                        (cons 'not clauses)))]
-                          (recur (into done nots) more-clauses)))
+                          (recur aliases (into done nots) more-clauses)))
+                  :else
                   (if-some [clauses (unnest clause)]
-                    (recur done (concat clauses more-clauses))
-                    (recur (conj done clause) more-clauses)))
+                    (recur aliases done (concat clauses more-clauses))
+                    (recur aliases (conj done (map #(aliases % %) clause)) more-clauses)))
                 [done]))]
       (concat
         (for [[head & clauses] rules
-              clauses (lift [] clauses)]
+              clauses (lift {} [] clauses)]
           (cons head clauses))
         ; postpone deref until side effects from above are done
         (lazy-seq @new-rules)))))
-
-(defn lift-keyword-preds
-  "Turn (:a e v) or (:_a v e) in (datom e :a v)."
-  [rules]
-  (for [[head & clauses] rules]
-    (cons head (map (fn self [[pred & args :as clause]]
-                      (cond
-                        (= 'not pred) (list 'not (self (first args)))
-                        (not (keyword? pred)) clause
-                        (.startsWith (name pred) "_")
-                        (let [[v e] args]
-                          (list 'datom e (keyword (namespace pred) (subs (name pred) 1)) v))
-                        :else
-                        (let [[e v] args]
-                          (list 'datom e pred v)))) clauses))))
-
-(defn lift-all [rules]
-  (-> rules lift-freshes lift-ors lift-keyword-preds))
 
 (defn deps
   "To be used after all lifting is done."
