@@ -1,24 +1,10 @@
 (ns enlivez.impl.seminaive
-  (:require [datascript.core :as d]
-    [cljs.analyzer :as ana]))
+  (:require [datascript.core :as d]))
 
 (defn- TODO [s]
   (throw (ex-info (str "TODO: " s) {})))
 
 (def special? '#{or and not fresh let #_new #_if #_when})
-
-(def ^:private ^:dynamic *env*)
-
-(defn resolve-pred [sym]
-  (cond
-    (vector? sym) sym ; for internal derived preds
-    (special? sym) sym
-    (:ns *env*) ; cljs
-    (:name (ana/resolve-var *env* sym (ana/confirm-var-exists-throw)))
-    :else
-    (if-some [m (-> sym resolve meta)]
-      (symbol (name (ns-name (:ns m))) (name (:name m)))
-      (throw (ex-info (str "Can't resolve \"" sym "\"") {:sym sym :env *env* :ns *ns*})))))
 
 (defn used-vars
   [[op & args]]

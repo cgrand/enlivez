@@ -445,6 +445,37 @@
     `(io-trigger* '~q '~vars
        (fn ~vars ~@body))))
 
+(defn- resolver [env]
+  (if (:ns env)
+    (fn [sym]
+      (if (impl/special? sym)
+        sym
+        (let [{:keys [name meta]} (ana/resolve-var env sym (ana/confirm-var-exists-throw))]
+          (if (::rule meta)
+            name
+            [:call name])
+          name)))
+    (fn [sym]
+      (if (impl/special? sym)
+        sym
+        (if-some [v (ns-resolve *ns* env sym)]
+          (let [m (meta v)]
+            (if (::rule m)
+              (symbol (-> m :ns ns-name name) (-> m :name name))
+              [:call v]))
+         (throw (ex-info (str "Unable to resolve symbol: " sym) {:sym sym :ns *ns*})))))))
+
+#_(defn resolve-pred [sym]
+   (cond
+     (vector? sym) sym ; for internal derived preds
+     (special? sym) sym
+     (:ns *env*) ; cljs
+     (:name (ana/resolve-var *env* sym (ana/confirm-var-exists-throw)))
+     :else
+     (if-some [m (-> sym resolve meta)]
+       (symbol (name (ns-name (:ns m))) (name (:name m)))
+       (throw (ex-info (str "Can't resolve \"" sym "\"") {:sym sym :env *env* :ns *ns*})))))
+
 (s/def ::args (s/coll-of simple-symbol? :kind vector?))
 
 (s/def ::defrule
@@ -459,14 +490,11 @@
                                 [name doc? [args*] clause+])}
   [& body]
   (when-valid [{:keys [doc args clauses] the-name :name} ::defrule body]
-    (let [the-name (cond-> (vary-meta the-name assoc :arglists (list args))
-                     doc (vary-meta assoc :doc doc))
-          rule (cons (cons (symbol (-> *ns* ns-name name) (name the-name)) args) clauses)
-          all-rules (impl/lift-all [rule])]
-      `(def ~the-name '~(if clauses
-                          {nil {:case (cons (cons (symbol (-> *ns* ns-name name) (name the-name)) args) clauses)
-                                :expansion all-rules}}
-                          {})))))
+    (let [decl `(def ~(cond-> (vary-meta the-name assoc :arglists `'~(list args) ::rule true)
+                        doc (vary-meta assoc :doc doc)) {})]
+      (if clauses
+        `(do ~decl (defcase ~the-name ::defrule ~args ~@clauses))
+        decl))))
 
 (defmacro defcase
   {:arglists '([name hint? [args*] clause+])}
@@ -474,8 +502,11 @@
   (when-valid [{:keys [hint args clauses] the-name :name} ::defcase body]
     (let [hint (or hint (keyword (gensym "case")))
           rule (cons (cons (symbol (-> *ns* ns-name name) (name the-name)) args) clauses)
-          all-rules (impl/lift-all [rule])]
+          all-rules (vec (impl/lift-all [rule] (resolver &env)))]
       `(do
-         (set! ~the-name (assoc ~the-name ~hint '~{:case (cons (cons (symbol (-> *ns* ns-name name) (name the-name)) args) clauses)
-                                                   :expansion all-rules}))
+         ~(if (:ns &env)
+            `(set! ~the-name (assoc ~the-name ~hint '~{::case (cons (cons (symbol (-> *ns* ns-name name) (name the-name)) args) clauses)
+                                                      ::expansion all-rules}))
+            `(alter-var-root (var ~the-name) assoc ~hint '~{::case (cons (cons (symbol (-> *ns* ns-name name) (name the-name)) args) clauses)
+                                                           ::expansion all-rules}))
          (var ~the-name)))))

@@ -1,10 +1,12 @@
 (ns enlivez.impl.seminaive-tests
-  (:require [enlivez.impl.seminaive :as impl])
   #?(:clj
      (:use [clojure.test :only [deftest is]])
      :cljs
      (:use-macros [cljs.test :only [deftest is]]))
-  (:require [datascript.core :as d]
+  (:require
+    [enlivez.impl.seminaive :as impl]
+    [enlivez.core :as ez]
+    [datascript.core :as d]
     #_[enlivez.core :as ez]))
 
 (def rsg-edb '{up #{[a e] [a f] [f m] [g n] [h n] [i o] [j o]}
@@ -66,3 +68,4 @@
                       `[[(anc x y p) (parent x y) (~'call ~vector x y p)]
                         [(anc x y p) (anc x z p') (parent z y) (~'call ~conj p' y p)]
                         [(lineage p) (anc ~'_ ~'_ p)]]))))))
+
