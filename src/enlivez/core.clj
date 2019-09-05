@@ -3,7 +3,8 @@
   (:require [clojure.core :as clj]
     [cljs.analyzer :as ana]
     [clojure.spec.alpha :as s]
-    [enlivez.q :as q]))
+    [enlivez.q :as q]
+    [enlivez.impl.seminaive :as impl]))
 
 (defprotocol Template
   (get-schema [_])
@@ -358,14 +359,15 @@
         ; TODO state-map may be expression (at least values)
         `(state-template '~(known-vars eid '_) '~(mapv known-vars args) (fn [~args] ~state-entity) ~(emit-cljs child schema))))))
 
-(defmacro ^:private if-valid
-  ([bindings+spec+value then] `(if-valid ~bindings+spec+value ~then nil))
-  ([[bindings spec value] then else]
-    `(let [conformed# (s/conform ~spec ~value)]
+(defmacro ^:private when-valid
+  [[bindings spec value] & body]
+    `(let [value# ~value
+           spec# ~spec
+           conformed# (s/conform spec# value#)]
        (if (= ::s/invalid conformed#)
-         ~else
+         (throw (ex-info "Invalid input" {:value value# :spec spec#}))
          (let [~bindings conformed#]
-           ~then)))))
+           ~@body))))
 
 (s/def ::fragment-body
   (s/cat
@@ -373,12 +375,11 @@
     :body (s/* any?)))
 
 (defn fragment [env known-vars & body]
-  (if-valid [{:keys [body options]} ::fragment-body body]
+  (when-valid [{:keys [body options]} ::fragment-body body]
     (let [{state-map :state :as options} (into {} (map (juxt :key :value)) options)]
       (if state-map
         (state env known-vars state-map body (dissoc options :state))
-        (fragment* env known-vars body options)))
-    (throw (ex-info "Invalid body" {:body body}))))
+        (fragment* env known-vars body options)))))
 
 (s/def ::for-body
   (s/cat
@@ -386,7 +387,7 @@
     :body (s/* any?)))
 
 (defn for [env known-vars q & body]
-  (if-valid [{:keys [body options]} ::fragment-body body]
+  (when-valid [{:keys [body options]} ::fragment-body body]
     (let [sort-expr (some (fn [{:keys [key value]}]
                            (when (= key :sort) value)) options)
           body (concat
@@ -408,8 +409,7 @@
                 own-keys (map #(apply-aliases % known-vars') own-keys)
                 aliased-sort-args (map #(apply-aliases % known-vars') sort-args)] ; known-vars and not known-vars' because we care about vars that were previously known
             `(for-template '~?q '~own-keys '~aliased-sort-args (fn [[~@sort-args]] ~sort-expr)
-              ~(emit-cljs child schema))))))
-    (throw (ex-info "Invalid body" {:body body}))))
+              ~(emit-cljs child schema))))))))
 
 (defmacro deftemplate [name args & body]
   (let [aliases (into {} (clj/for [arg args] [arg (gensym arg)]))
@@ -417,12 +417,6 @@
         schema (get-schema template)]
     `(def ~(vary-meta name assoc ::template (mapv aliases args) ::schema schema)
       ~(emit-cljs template schema))))
-
-#_(defmacro defrule [rulename args & clauses]
-   (if (seq? args)
-     `(do
-        ~@(map (fn [args+clauses] `(defrule ~rulename ~@args+clauses)) (cons args clauses)))
-     ))
 
 (defmacro defhandler
   "Defines a function suitable to be called in a handler expression.
@@ -450,3 +444,38 @@
         vars (vec (used-vars `(do ~@body) (fresh-vars q {})))]
     `(io-trigger* '~q '~vars
        (fn ~vars ~@body))))
+
+(s/def ::args (s/coll-of simple-symbol? :kind vector?))
+
+(s/def ::defrule
+  (s/cat :name simple-symbol? :doc (s/? string?)
+    :args ::args :clauses (s/? (s/+ any?))))
+
+(s/def ::defcase
+  (s/cat :name symbol? :hint (s/? keyword?)
+    :args ::args :clauses (s/+ any?)))
+
+(defmacro defrule {:arglists '([name doc? [args*]]
+                                [name doc? [args*] clause+])}
+  [& body]
+  (when-valid [{:keys [doc args clauses] the-name :name} ::defrule body]
+    (let [the-name (cond-> (vary-meta the-name assoc :arglists (list args))
+                     doc (vary-meta assoc :doc doc))
+          rule (cons (cons (symbol (-> *ns* ns-name name) (name the-name)) args) clauses)
+          all-rules (impl/lift-all [rule])]
+      `(def ~the-name '~(if clauses
+                          {nil {:case (cons (cons (symbol (-> *ns* ns-name name) (name the-name)) args) clauses)
+                                :expansion all-rules}}
+                          {})))))
+
+(defmacro defcase
+  {:arglists '([name hint? [args*] clause+])}
+  [& body]
+  (when-valid [{:keys [hint args clauses] the-name :name} ::defcase body]
+    (let [hint (or hint (keyword (gensym "case")))
+          rule (cons (cons (symbol (-> *ns* ns-name name) (name the-name)) args) clauses)
+          all-rules (impl/lift-all [rule])]
+      `(do
+         (set! ~the-name (assoc ~the-name ~hint '~{:case (cons (cons (symbol (-> *ns* ns-name name) (name the-name)) args) clauses)
+                                                   :expansion all-rules}))
+         (var ~the-name)))))
