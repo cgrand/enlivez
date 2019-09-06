@@ -407,3 +407,17 @@
               (if addition
                 (apply send tuple)
                 (apply stop tuple)))))))))
+
+; should move to cljc
+(defn collect-case-ruleset [{::keys [expansion deps] :as rule-value}]
+  (loop [rule-set (set expansion) done #{} todo deps]
+    (if (seq todo)
+      (let [cases (mapcat (fn [dep] (vals @dep)) deps)]
+        (recur
+          (into rule-set (mapcat ::expansion) cases)
+          (into done deps)
+          (remove done (mapcat ::deps cases))))
+      rule-set)))
+
+(defn collect-ruleset [rule]
+  (transduce (map collect-case-ruleset) into #{} (vals rule)))

@@ -453,16 +453,16 @@
         (let [{:keys [name meta]} (ana/resolve-var env sym (ana/confirm-var-exists-throw))]
           (if (::rule meta)
             name
-            [:var name])
-          name)))
+            (list 'var name)))))
     (fn [sym]
       (if (impl/special? sym)
         sym
         (if-some [v (ns-resolve *ns* env sym)]
-          (let [m (meta v)]
+          (let [m (meta v)
+                name (symbol (-> m :ns ns-name name) (-> m :name name))]
             (if (::rule m)
-              (symbol (-> m :ns ns-name name) (-> m :name name))
-              v))
+              name
+              (list 'var name)))
          (throw (ex-info (str "Unable to resolve symbol: " sym) {:sym sym :ns *ns*})))))))
 
 #_(defn resolve-pred [sym]
@@ -486,8 +486,10 @@
   (s/cat :name symbol? :hint (s/? keyword?)
     :args ::args :clauses (s/+ any?)))
 
-(defmacro defrule {:arglists '([name doc? [args*]]
-                                [name doc? [args*] clause+])}
+(defmacro defrule
+  "Defines an EZ rule with an optional implementation."
+  {:arglists '([name doc? [args*]]
+                [name doc? [args*] clause+])}
   [& body]
   (when-valid [{:keys [doc args clauses] the-name :name} ::defrule body]
     (let [decl `(def ~(cond-> (vary-meta the-name assoc :arglists `'~(list args) ::rule true)
@@ -500,33 +502,56 @@
   (cond
     (= 'not pred) `(list 'not ~(quote-clause (first args)))
     (symbol? pred) `(list '~pred ~@(map (fn [x] (if (symbol? x) (list 'quote x) x)) args))
-    (var? pred) `(list 'call ~pred ~@(map (fn [x] (if (symbol? x) (list 'quote x) x)) args))
-    (= :var (first pred)) `(list 'call (fn [& args#] (apply ~(second pred) args#))
+    (= 'var (first pred)) `(list 'call ~pred
                              ~@(map (fn [x] (if (symbol? x) (list 'quote x) x)) args))
     :else (throw (ex-info (str "Unable to quote " clause) {:clause clause}))))
 
 (defn- quote-rule [[head & clauses]]
   `(list '~head ~@(map quote-clause clauses)))
 
+(defn analyze-case
+  "Returns a map with two keys:
+   :deps, a collection of qualified symbols of rules the input case depends upon,
+   :expansion, a clojure expression that evaluates to a detalog expression."
+  [&env full-name args clauses]
+  (let [rule (cons (cons full-name args) clauses)
+        resolve (resolver &env)
+        vdeps (volatile! #{})
+        resolve (fn [x]
+                  (let [x (resolve x)]
+                    (when (qualified-symbol? x)
+                      (vswap! vdeps conj x))
+                    x))
+        all-rules (into [] (map quote-rule) (impl/lift-all [rule] resolve))] ; side effects don't reorder across this binding
+    {:expansion all-rules
+     :deps @vdeps}))
+
 (defmacro defcase
   {:arglists '([name hint? [args*] clause+])}
   [& body]
   (when-valid [{:keys [hint args clauses] the-name :name} ::defcase body]
     (let [hint (or hint (keyword (gensym "case")))
-          rule (cons (cons (symbol (-> *ns* ns-name name) (name the-name)) args) clauses)
-          resolve (resolver &env)
-          vdeps (volatile! #{})
-          resolve (fn [x]
-                    (let [x (resolve x)]
-                      (when (qualified-symbol? x)
-                        (vswap! vdeps conj x))
-                      x))
-          all-rules (into [] (map quote-rule) (impl/lift-all [rule] resolve)) ; side effects don't reorder across this binding
-          value `{::case '~(cons (cons (symbol (-> *ns* ns-name name) (name the-name)) args) clauses)
-                  ::expansion ~all-rules
-                  ::deps '~(deref vdeps)}]
+          full-name (symbol (-> *ns* ns-name name) (name the-name))
+          {:keys [deps expansion]} (analyze-case &env full-name args clauses)
+          expr `{::case '~(cons (cons full-name args) clauses)
+                 ::expansion ~expansion
+                 ::deps [~@(map (fn [x] `(var ~x)) deps)]}]
       `(do
          ~(if (:ns &env)
-            `(set! ~the-name (assoc ~the-name ~hint ~value))
-            `(alter-var-root (var ~the-name) assoc ~hint ~value))
+            `(set! ~the-name (assoc ~the-name ~hint ~expr))
+            `(alter-var-root (var ~the-name) assoc ~hint ~expr))
          (var ~the-name)))))
+
+; should move to cljc
+(defn collect-case-ruleset [{::keys [expansion deps] :as rule-value}]
+  (loop [rule-set (set expansion) done #{} todo deps]
+    (if (seq todo)
+      (let [cases (mapcat (fn [dep] (vals @dep)) deps)]
+        (recur
+          (into rule-set (mapcat ::expansion) cases)
+          (into done deps)
+          (remove done (mapcat ::deps cases))))
+      rule-set)))
+
+(defn collect-ruleset [rule]
+  (transduce (map collect-case-ruleset) into #{} (vals rule)))
