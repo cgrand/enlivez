@@ -453,7 +453,7 @@
         (let [{:keys [name meta]} (ana/resolve-var env sym (ana/confirm-var-exists-throw))]
           (if (::rule meta)
             name
-            [:call name])
+            [:var name])
           name)))
     (fn [sym]
       (if (impl/special? sym)
@@ -462,7 +462,7 @@
           (let [m (meta v)]
             (if (::rule m)
               (symbol (-> m :ns ns-name name) (-> m :name name))
-              [:call v]))
+              v))
          (throw (ex-info (str "Unable to resolve symbol: " sym) {:sym sym :ns *ns*})))))))
 
 #_(defn resolve-pred [sym]
@@ -496,17 +496,29 @@
         `(do ~decl (defcase ~the-name ::defrule ~args ~@clauses))
         decl))))
 
+(defn- quote-clause [[pred & args :as clause]]
+  (cond
+    (= 'not pred) `(list 'not ~(quote-clause (first args)))
+    (symbol? pred) `(list '~pred ~@(map (fn [x] (if (symbol? x) (list 'quote x) x)) args))
+    (var? pred) `(list 'call ~pred ~@(map (fn [x] (if (symbol? x) (list 'quote x) x)) args))
+    (= :var (first pred)) `(list 'call (fn [& args#] (apply ~(second pred) args#))
+                             ~@(map (fn [x] (if (symbol? x) (list 'quote x) x)) args))
+    :else (throw (ex-info (str "Unable to quote " clause) {:clause clause}))))
+
+(defn- quote-rule [[head & clauses]]
+  `(list '~head ~@(map quote-clause clauses)))
+
 (defmacro defcase
   {:arglists '([name hint? [args*] clause+])}
   [& body]
   (when-valid [{:keys [hint args clauses] the-name :name} ::defcase body]
     (let [hint (or hint (keyword (gensym "case")))
           rule (cons (cons (symbol (-> *ns* ns-name name) (name the-name)) args) clauses)
-          all-rules (vec (impl/lift-all [rule] (resolver &env)))]
+          all-rules (into [] (map quote-rule) (impl/lift-all [rule] (resolver &env)))]
       `(do
          ~(if (:ns &env)
-            `(set! ~the-name (assoc ~the-name ~hint '~{::case (cons (cons (symbol (-> *ns* ns-name name) (name the-name)) args) clauses)
-                                                      ::expansion all-rules}))
-            `(alter-var-root (var ~the-name) assoc ~hint '~{::case (cons (cons (symbol (-> *ns* ns-name name) (name the-name)) args) clauses)
-                                                           ::expansion all-rules}))
+            `(set! ~the-name (assoc ~the-name ~hint {::case '~(cons (cons (symbol (-> *ns* ns-name name) (name the-name)) args) clauses)
+                                                     ::expansion ~all-rules}))
+            `(alter-var-root (var ~the-name) assoc ~hint {::case '~(cons (cons (symbol (-> *ns* ns-name name) (name the-name)) args) clauses)
+                                                          ::expansion ~all-rules}))
          (var ~the-name)))))
