@@ -514,11 +514,19 @@
   (when-valid [{:keys [hint args clauses] the-name :name} ::defcase body]
     (let [hint (or hint (keyword (gensym "case")))
           rule (cons (cons (symbol (-> *ns* ns-name name) (name the-name)) args) clauses)
-          all-rules (into [] (map quote-rule) (impl/lift-all [rule] (resolver &env)))]
+          resolve (resolver &env)
+          vdeps (volatile! #{})
+          resolve (fn [x]
+                    (let [x (resolve x)]
+                      (when (qualified-symbol? x)
+                        (vswap! vdeps conj x))
+                      x))
+          all-rules (into [] (map quote-rule) (impl/lift-all [rule] resolve)) ; side effects don't reorder across this binding
+          value `{::case '~(cons (cons (symbol (-> *ns* ns-name name) (name the-name)) args) clauses)
+                  ::expansion ~all-rules
+                  ::deps '~(deref vdeps)}]
       `(do
          ~(if (:ns &env)
-            `(set! ~the-name (assoc ~the-name ~hint {::case '~(cons (cons (symbol (-> *ns* ns-name name) (name the-name)) args) clauses)
-                                                     ::expansion ~all-rules}))
-            `(alter-var-root (var ~the-name) assoc ~hint {::case '~(cons (cons (symbol (-> *ns* ns-name name) (name the-name)) args) clauses)
-                                                          ::expansion ~all-rules}))
+            `(set! ~the-name (assoc ~the-name ~hint ~value))
+            `(alter-var-root (var ~the-name) assoc ~hint ~value))
          (var ~the-name)))))
