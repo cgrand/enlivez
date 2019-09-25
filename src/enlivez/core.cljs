@@ -5,7 +5,8 @@
     [clojure.core :as clj]
     [datascript.core :as d]
     [enlivez.q :as q]
-    [reagent.core :as r]))
+    [reagent.core :as r]
+    [enlivez.impl.seminaive :as impl]))
 
 ; https://github.com/tonsky/datascript/wiki/Tips-&-tricks#editing-the-schema
 
@@ -17,22 +18,37 @@
 (defn transact-right-after! [tx]
   (set! *reentrant* (conj *reentrant* tx)))
 
+(def ^:private core-schema
+  {::child {:db/valueType :db.type/ref
+            :db/isComponent true
+            :db/cardinality :db.cardinality/many}
+   ::key {:db/unique :db.unique/identity}})
+
+(defn- register-meta-subscriber! [conn]
+  (d/listen! conn ::meta-subscriber
+    (fn [{:keys [tx-data db-after]}]
+      (when-not *reentrant*
+        (let [pending-txs
+              (binding [*reentrant* []]
+                (doseq [[eid q f pq] (d/q '[:find ?eid ?q ?f ?pq :where [?eid ::live-query ?q] [?eid ::prepared-live-query ?pq] [?eid ::handler ?f]] db-after)]
+                  (f (pq db-after)))
+                *reentrant*)]
+          (doseq [tx pending-txs]
+            (d/transact! conn tx)))))))
+
 ;; Datasource is only accessible through subscription
 (def ^:private conn
-  (doto (d/create-conn {::child {:db/valueType :db.type/ref
-                                 :db/isComponent true
-                                 :db/cardinality :db.cardinality/many}
-                        ::key {:db/unique :db.unique/identity}})
-    (d/listen! ::meta-subscriber
-      (fn [{:keys [tx-data db-after]}]
-        (when-not *reentrant*
-          (let [pending-txs
-                (binding [*reentrant* []]
-                  (doseq [[eid q f pq] (d/q '[:find ?eid ?q ?f ?pq :where [?eid ::live-query ?q] [?eid ::prepared-live-query ?pq] [?eid ::handler ?f]] db-after)]
-                    (f (pq db-after)))
-                  *reentrant*)]
-            (doseq [tx pending-txs]
-              (d/transact! conn tx))))))))
+  (doto (d/create-conn core-schema) register-meta-subscriber!))
+
+(defn hijack-conn! [existing-conn]
+  (.log js/console "NOPE43")
+  (let [existing-db @existing-conn]
+    (doto (into (:schema existing-db) core-schema)
+      (->>
+        (d/init-db (d/datoms existing-db :eavt))
+        (d/reset-conn! existing-conn)))
+    (register-meta-subscriber! existing-conn))
+  (set! conn existing-conn))
 
 (defn call-with-db [db f this e]
   (let [tx (.call f this e db)]
@@ -45,9 +61,21 @@
         (d/transact! conn (if (map? tx) [tx] tx))))))
 
 (defprotocol Template
-  (additional-schema [t] "Returns schema declarations that should augment the current db")
-  (query-tree [t whole-schema])
+  #_(additional-schema [t] "Returns schema declarations that should augment the current db")
+  (collect-rules [t] "Returns a map keyed by pairs [key-vector-expr clauses], values are query-trees.")
   (instantiate! [t mount! ks]))
+
+#_(defn- qt-to-rules* [template parent-rule]
+   (let [rulename (gensym 'rule)]
+     (for [[[kve clauses] children] (query-tree template)]
+       )))
+
+#_(defn qt-to-rules [root-template]
+   (let [rulename (gensym 'rule)]
+     (for [[[kve clauses] children] (query-tree template)]
+       ()
+       )))
+
 
 (defprotocol Component
   (ensure! [c ks] "Returns the child component for (peek ks)")
@@ -176,52 +204,79 @@
           (finally
             (d/transact! conn [[:db/retractEntity [::key flat-k]]])))))))
 
-(defn for-template [q ks sort-ks sort-f child]
-  (reify  Template
-    (additional-schema [t] (additional-schema child))
-    (query-tree [t whole-schema]
-      {[q ks] {0 {[[] sort-ks] nil}
-               1 (query-tree child  whole-schema)}})
-    (instantiate! [t mount! ks]
-      (for-component child sort-f mount! ks))))
+(defn for-template [activation body-activation
+                    rule-vars rule-bodies
+                    {:keys [rules deps]}
+                    sort-ks sort-f
+                    child]
+  (let [[_ ppath & bound-vars] activation
+        bound-vars (set bound-vars)
+        qhead (cons (gensym "q") rule-vars)
+        qrules (map #(cons qhead %) rule-bodies)
+        ks (vec (impl/keyvars rule-bodies (:rschema @conn) bound-vars))
+        k (gensym "k")
+        path (second body-activation)
+        main-rule (list body-activation
+                    activation
+                    qhead
+                    (list* 'call vector (conj ks k))
+                    (list 'call conj ppath k path))]
+    (reify  Template
+      #_(additional-schema [t] (additional-schema child))
+      (collect-rules [t]
+        (list*
+          main-rule
+          (list (list `component-path path) body-activation)
+          (concat
+            qrules
+            rules
+            (collect-rules child)))
+        #_#_#_clauses
+        ()
+        {[q ks] {0 {[[] sort-ks] nil}
+                 1 (query-tree child)}})
+      (instantiate! [t mount! ks]
+        (for-component child sort-f mount! ks)))))
 
 (defn fragment-template [body children]
   (reify Template
-    (additional-schema [t] (into {} (map additional-schema) (map peek children)))
-    (query-tree [t whole-schema]
-      (into {} (map-indexed (fn [i child] [i (query-tree child whole-schema)])) (map peek children)))
+    #_(additional-schema [t] (into {} (map additional-schema) (map peek children)))
+    (collect-rules [t]
+      (mapcat (fn [[path child [activation-head :as activation]]]
+                (list* activation
+                  (list (list `component-path (second activation-head)) activation)
+                  (collect-rules child))) children))
     (instantiate! [t mount! ks]
       (fragment-component body children mount! ks))))
 
-(defn terminal-template [args f]
+(defn terminal-template [rules f]
   (reify
     Template
-    (additional-schema [t] {})
-    (query-tree [t whole-schema]
-      {[[] args] nil})
+    #_(additional-schema [t] {})
+    (collect-rules [t] rules)
     (instantiate! [t mount! ks]
       (terminal-component f mount! ks))))
 
 (defn state-template [eid args state-entity-f child]
-  (reify
-    Template
-    (additional-schema [t] {})
-    (query-tree [t whole-schema]
-      {[#_[] (list `ensure-state eid)
-        (into [eid] args)] (assoc
-                             (query-tree child whole-schema)
-                             [[] nil] nil)})
-    (instantiate! [t mount! ks]
-      (state-component state-entity-f child mount! ks))))
+  #_(reify
+     Template
+     #_(additional-schema [t] {})
+     (collect-rules [t]
+       {[#_[] (list `ensure-state eid)
+         (into [eid] args)] (assoc
+                              (query-tree child)
+                              [[] nil] nil)})
+     (instantiate! [t mount! ks]
+       (state-component state-entity-f child mount! ks))))
 
 (defn include-template [clauses child]
-  (reify
-    Template
-    (additional-schema [t] {})
-    (query-tree [t whole-schema]
-      {[clauses nil] (query-tree child whole-schema)})
-    (instantiate! [t mount! ks]
-      (instantiate! child mount! ks))))
+  #_(reify
+     Template
+     #_(additional-schema [t] {})
+     (collect-rules [t]
+       {[clauses nil] (query-tree child)})
+     (instantiate! [t mount! ks]
+       (instantiate! child mount! ks))))
 
 (declare ^::special for ^::special fragment ^::special terminal)
 
@@ -235,6 +290,29 @@
     (and (vector? x) (keyword? (first x)))
     [(into [(first x)] (mapcat simplify (rest x)))]
     :else (mapcat simplify x)))
+
+(defn- gen-rules
+  "interim fn to map from query trees to rules"
+  ([qt] (gen-rules qt nil))
+  ([qt [_ parent-path & parent-args :as parent-head]]
+    (mapcat (fn [[k v]]
+              (let [[q ks] (if (number? k) [nil k] k)
+                    q (if (= `ensure-state (first q)) [q] q)
+                    args (distinct (concat parent-args
+                                     (filter #(and (symbol? %) (not= '_ %))
+                                       (tree-seq seq? next
+                                         (cons 'and q))))) ; not great with not
+                    path-arg (gensym 'path)
+                    rule-head (list* (gensym 'rule) path-arg args)
+                    rule (if parent-head
+                           (concat
+                             (list* rule-head parent-head q)
+                             [(list 'append parent-path ks path-arg)])
+                           (concat
+                             (cons rule-head q)
+                             [(list 'append nil ks path-arg)]))]
+                (cons rule (gen-rules v rule-head))))
+      qt)))
 
 (defn- flatten-hq
   "interim fn to map from query trees to hierarchical queries"
@@ -327,8 +405,9 @@
 (defn mount [template elt]
   (let [dom (r/atom nil)
         schema (let [db @conn]
-                 (doto (into (:schema db) (additional-schema template))
-                   (->> (d/init-db (d/datoms db :eavt)) (d/reset-conn! conn))))
+                 (:rschema db)
+                 #_(doto (into (:schema db) (additional-schema template))
+                    (->> (d/init-db (d/datoms db :eavt)) (d/reset-conn! conn))))
         {root-eid -1} (:tempids (d/transact! conn [[:db/add -1 ::key []]]))
         [component txs] (binding [*reentrant* []]
                           [(instantiate! template #(reset! dom %) [[] []]) *reentrant*])
@@ -338,7 +417,9 @@
                                 path (pop path)
                                 f (if upsert ensure-path! delete-path!)]]
                     (f component path)))
-        subscriptions (vec (mapcat #(subscription % update!) (flatten-hq (query-tree template schema))))]
+        qt (collect-rules template) ; to pass schema or not to pass schema ?
+        _ (prn 'QT7 (gen-rules qt))
+        subscriptions (vec (mapcat #(subscription % update!) (flatten-hq qt)))]
     (d/transact! conn subscriptions)
     (doseq [tx txs] (d/transact! conn tx))
     (r/render [#(first (simplify @dom))] elt)))
@@ -421,3 +502,9 @@
 
 (defn collect-ruleset [rule]
   (transduce (map collect-case-ruleset) into #{} (vals rule)))
+
+(comment
+  => (ez/deftemplate xoxo [] (for [(_ :user/name name)] [:h1 "hello" name]))
+  => (`ez/component-path (impl/eval-rules {`xoxo #{[[] "You"]}} (ez/collect-rules xoxo)))
+  #{([0 ["You"]])}
+  )

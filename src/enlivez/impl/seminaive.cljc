@@ -5,26 +5,18 @@
   (throw (ex-info (str "TODO: " s) {})))
 
 (def special? '#{or and not fresh let #_new #_if #_when})
-
-(defn used-vars
-  [[op & args]]
-  (if (special? op)
-    (case op
-      fresh (let [[new-vars & args] args]
-              (remove (set new-vars) (mapcat used-vars args)))
-      (not and or) (mapcat used-vars args))
-    (filter #(and (symbol? %) (not= '_ %)) args)))
+(def special-pred? #{`datom})
 
 ;; ok the goal here is to implement seminaive evaluation for a datalog program
 
 (defn flatten-map
   "Returns a seq of clauses."
   ([clause]
-    (let [id (or (:as clause) (gensym 'id))]
+    (let [id (or (:db/id clause) (gensym 'id))]
       (flatten-map clause id)))
   ([clause id]
     (cons 'and
-      (for [[k v] (dissoc clause :as)]
+      (for [[k v] (dissoc clause :db/id)]
         (list k id v)))))
 
 (defn expand-kw-clause [[k & args] missing]
@@ -55,6 +47,13 @@
         clauses @vclauses]
     (when (seq clauses)
       (conj clauses clause))))
+
+(defn used-vars
+  "Returns vars used in a canonical (lifted) clause."
+  [[op & args :as clause]]
+  (case op
+    not (recur (first args))
+    (filter #(and (symbol? %) (not= '_ %)) args)))
 
 (defn lift-all
   "Expand rules (which may contain nested expressions, ands, ors, nots or freshes) into
@@ -118,7 +117,7 @@
           ; postpone deref until side effects from above are done
           (lazy-seq @new-rules))))))
 
-(defn deps
+(defn rules-deps
   "To be used after all lifting is done."
   [rules]
   (reduce
@@ -140,8 +139,9 @@
 
 ;; stratify
 (defn sccs
-  "Returns the strongly connected components of a graph specified by its nodes
-   and a successor function succs from node to nodes.
+  "Returns the strongly connected components (as a set of sets)
+   of a graph specified by its nodes and a successor function succs
+   from node to nodes.
    The used algorithm is Tarjan's one."
   [nodes succs]
   (letfn [(sc [env node]
@@ -198,7 +198,7 @@
 (defn stratify
   "To be used after all lifting is done."
   [rules]
-  (let [graph (deps rules)
+  (let [graph (rules-deps rules)
         negations (negations rules)
         sccs (sccs (keys graph) graph)
         _ (doseq [scc sccs a scc b scc :when (negations [a b])]
@@ -554,3 +554,93 @@
 (comment
   => (index-plan [#{1} #{2} #{1 2} #{1 3} #{1 2 3}])
   ([1 3 2] [2 1]))
+
+;; computing keyset from clauses
+
+(defn var-deps1 
+  "returns a sequence of symbols pairs where the key sets the value
+   (e.g. cardinality one).
+   :known is a special key "
+  [[op & args] card1? uniq?]
+  (case op
+    not nil
+    call (let [ret (last args)] ; is this right
+           (zipmap (butlast args) (repeat ret)))
+    enlivez.impl.seminaive/datom
+    (let [[e a v] args]
+      (if (keyword? a)
+        (cond
+          (symbol? e)
+          (if (symbol? v)
+            (if (card1? a)
+              [e v]
+              {e e
+               v v})
+            (if (uniq? a)
+              [:known e]
+              [e e]))
+          (symbol? v) ; and not symbol? e
+          (when-not (card1? a)
+            [v v]))
+        (throw (ex-info "Unsupported dynamic attribute." {:a a}))))
+    ; don't try going down rules at the moment
+    (zipmap args args)))
+
+#_(defn- deps [conjunction card1? uniq?]
+   (transduce (mapcat
+               (fn self [clause]
+                 (if (seq? clause) 
+                   (case (first clause)
+                     ; emit nothing on not: imagine (not [?a :ident/attr :k])
+                     (not not=) nil
+                     = (let [syms (filter symbol? (next clause))]
+                         (for [a syms, b syms
+                               :when (not= a b)]
+                           [a b])))
+                   ; else must be a vector
+                   (let [[e a v] (into clause '[_ _ _])]
+                     (when-not (symbol? a)
+                       (cond
+                         (= '_ e) (when-not (= '_ v) [[v v]])
+                         (= '_ v) [[e e]]
+                         (symbol? e)
+                         (cond
+                           (symbol? v)
+                           (if (= :db.cardinality/one (get-in schema [a :db/cardinality] :db.cardinality/one))
+                             [[e v]]
+                             [[v v]]) ; self reference or else it may become unreachable
+                           (get-in schema [a :db/unique]) [[:known e]])
+                         (seq? e)
+                         (case (first e)
+                           get-else (let [v a
+                                          [_ src e a default] e]
+                                      (recur [e a v])))
+                         :else :TODO))))))
+     (completing
+       (fn [succs [a b]]
+         (update succs a (fnil conj []) b)))
+     {} conjunction))
+
+(defn- keyset [clauses schema known-vars]
+  (let [card1? #(= :db.cardinality/one (get-in schema [% :db/cardinality] :db.cardinality/one))
+        uniq? #(some-> schema (get %) :db/unique)
+        succs (transduce (mapcat #(var-deps1 % card1? uniq?))
+                (fn 
+                  ([succs] succs)
+                  ([succs [k v]]
+                    (assoc succs k (conj (succs k #{}) v))))
+                {:known (set known-vars)}
+                clauses)
+        sccs (sccs (keys succs) succs)
+        scc-of (into {}
+                 (for [scc sccs, var scc]
+                   [var scc]))
+        key-sccs (transduce (comp cat (map scc-of)) disj (disj sccs #{:known}) (vals succs))]
+    key-sccs))
+
+(defn keyvars [bodies schema known-vars]
+  (into #{}
+    (comp
+      (mapcat #(keyset % schema known-vars))
+      (map first))
+    bodies))

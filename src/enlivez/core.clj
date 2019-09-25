@@ -6,9 +6,175 @@
     [enlivez.q :as q]
     [enlivez.impl.seminaive :as impl]))
 
+(defmacro ^:private DEPRECATED []
+  `(throw (ex-info "DEPRECATED" {})))
+
+(defmacro ^:private TODO []
+  `(throw (ex-info "TODO" {})))
+
+(defmacro ^:private when-valid
+  [[bindings spec value] & body]
+    `(let [value# ~value
+           spec# ~spec
+           conformed# (s/conform spec# value#)]
+       (if (= ::s/invalid conformed#)
+         (throw (ex-info "Invalid input" {:value value# :spec spec#}))
+         (let [~bindings conformed#]
+           ~@body))))
+
+;; rules
+
+(defn- resolver [env]
+  (if (:ns env)
+    (fn [sym]
+      (if (or (impl/special? sym) (impl/special-pred? sym))
+        sym
+        (let [{:keys [name meta]} (ana/resolve-var env sym (ana/confirm-var-exists-throw))]
+          (if (::rule meta)
+            name
+            (list 'var name)))))
+    (fn [sym]
+      (if (or (impl/special? sym) (impl/special-pred? sym))
+        sym
+        (if-some [v (ns-resolve *ns* env sym)]
+          (let [m (meta v)
+                name (symbol (-> m :ns ns-name name) (-> m :name name))]
+            (if (::rule m)
+              name
+              (list 'var name)))
+         (throw (ex-info (str "Unable to resolve symbol: " sym) {:sym sym :ns *ns*})))))))
+
+(s/def ::args (s/coll-of simple-symbol? :kind vector?))
+
+(s/def ::defrule
+  (s/cat :name simple-symbol? :doc (s/? string?)
+    :args ::args :clauses (s/? (s/+ any?))))
+
+(s/def ::defcase
+  (s/cat :name symbol? :hint (s/? keyword?)
+    :args ::args :clauses (s/+ any?)))
+
+(defmacro defrule
+  "Defines an EZ rule with an optional implementation."
+  {:arglists '([name doc? [args*]]
+                [name doc? [args*] clause+])}
+  [& body]
+  (when-valid [{:keys [doc args clauses] the-name :name} ::defrule body]
+    (let [decl `(def ~(cond-> (vary-meta the-name assoc :arglists `'~(list args) ::rule true)
+                        doc (vary-meta assoc :doc doc)) {})]
+      (if clauses
+        `(do ~decl (defcase ~the-name ::defrule ~args ~@clauses))
+        decl))))
+
+(defn- quote-clause [[pred & args :as clause]]
+  (cond
+    (= 'not pred) `(list 'not ~(quote-clause (first args)))
+    (symbol? pred) `(list '~pred ~@(map (fn [x] (if (symbol? x) (list 'quote x) x)) args))
+    (= 'var (first pred)) `(list '~'call ~pred
+                             ~@(map (fn [x] (if (symbol? x) (list 'quote x) x)) args))
+    :else (throw (ex-info (str "Unable to quote " clause) {:clause clause}))))
+
+(defn- quote-clauses [clauses]
+  `(list ~@(map quote-clause clauses)))
+
+(defn- quote-rule [[head & clauses :as rule]]
+  `(list '~head ~@(map quote-clause clauses)))
+
+(defn analyze-case
+  "Returns a map with two keys:
+   :deps, a collection of qualified symbols of rules the input case depends upon,
+   :expansion, a clojure expression that evaluates to a datalog expression."
+  [&env full-name args clauses]
+  (let [rule (cons (cons full-name args) clauses)
+        resolve (resolver &env)
+        vdeps (volatile! #{})
+        resolve (fn [x]
+                  (let [x (resolve x)]
+                    (when (and (qualified-symbol? x) (not (impl/special-pred? x)))
+                      (vswap! vdeps conj x))
+                    x))
+        all-rules (into [] (map quote-rule) (impl/lift-all [rule] resolve))] ; side effects don't reorder across this binding
+    {:expansion all-rules
+     :deps @vdeps}))
+
+(defmacro bleh []
+  (let [resolve (resolver &env)]
+    (resolve `datom)))
+
+(defn analyze-q
+  "Analyze a query."
+  [&env clauses]
+  ; add line info ?
+  (let [tmp-name (gensym 'q)
+        rule (cons (list tmp-name) clauses)
+        resolve (resolver &env)
+        vdeps (volatile! #{})
+        resolve (fn [x]
+                  (let [x (resolve x)]
+                    (when (and (qualified-symbol? x) (not (impl/special-pred? x)))
+                      (vswap! vdeps conj x))
+                    x))
+        all-rules (impl/lift-all [rule] resolve)
+        all-rules (vec all-rules) ; side effects! don't reorder across this binding
+        args ; args is the intersection of vars of each rule
+        (transduce
+          (keep (fn [[[pred] & clauses]]
+                  (when (= pred tmp-name)
+                    (into #{} (mapcat impl/used-vars) clauses))))
+          (fn
+            ([a] a)
+            ([a b] (transduce (remove a) disj b b)))
+          identity all-rules)
+        support-rules (into []
+                        (comp
+                          (remove (fn [[[h]]] (= h tmp-name)))
+                          (map quote-rule))
+                        all-rules)
+        bodies (into [] 
+                 (comp
+                   (keep (fn [[h & body :as rule]]
+                           (when (= h tmp-name) body)))
+                   (map quote-clauses))
+                 all-rules)] 
+    {:vars args
+     :bodies bodies
+     :support-rules support-rules
+     :deps @vdeps}))
+
+(defmacro defcase
+  {:arglists '([name hint? [args*] clause+])}
+  [& body]
+  (when-valid [{:keys [hint args clauses] the-name :name} ::defcase body]
+    (let [hint (or hint (keyword (gensym "case")))
+          full-name (symbol (-> *ns* ns-name name) (name the-name))
+          {:keys [deps expansion]} (analyze-case &env full-name args clauses)
+          expr `{::case '~(cons (cons full-name args) clauses)
+                 ::expansion ~expansion
+                 ::deps [~@(map (fn [x] `(var ~x)) deps)]}]
+      `(do
+         ~(if (:ns &env)
+            `(set! ~the-name (assoc ~the-name ~hint ~expr))
+            `(alter-var-root (var ~the-name) assoc ~hint ~expr))
+         (var ~the-name)))))
+
+; should move to cljc
+(defn collect-case-ruleset [{::keys [expansion deps] :as rule-value}]
+  (loop [rule-set (set expansion) done #{} todo deps]
+    (if (seq todo)
+      (let [cases (mapcat (fn [dep] (vals @dep)) deps)]
+        (recur
+          (into rule-set (mapcat ::expansion) cases)
+          (into done deps)
+          (remove done (mapcat ::deps cases))))
+      rule-set)))
+
+(defn collect-ruleset [rule]
+  (transduce (map collect-case-ruleset) into #{} (vals rule)))
+;; end of rules
+
 (defprotocol Template
-  (get-schema [_])
-  (emit-cljs [_ schema]))
+  #_(get-schema [_])
+  (emit-cljs [_]))
 
 ;; query maps syntax
 (defn- reverse-lookup
@@ -220,14 +386,6 @@
   ; in presence of many cycles the key may not be minimal
   (into #{} (comp (mapcat #(keyset % schema known-vars)) (map first)) (dnf (cons 'and expanded-q))))
 
-(defn apply-aliases [x known-vars]
-  (letfn [(walk [x]
-            (cond
-              (seq? x) (cons (first x) (map walk (next x)))
-              (vector? x) (into [] (map walk) x)
-              :else (known-vars x x)))]
-    (walk x)))
-
 ;; hiccup-style template
 (defn- handler [expr]
   `(txing-handler (fn [~'% ~'%this ~'%db] ~expr)))
@@ -242,45 +400,61 @@
   "Returns [expressions hollowed-x] where
    expressions is a sequence of [path expression] and hollowed-x is x where symbols and
    sequences have been replaced by nil."
-  [env known-vars x]
-  (cond
-    (associative? x)
-    (reduce-kv (fn [[exprs x] k v]
-                 (let [v (if (and (keyword? k) (.startsWith (name k) "on-"))
-                           (handler v)
-                           v)
-                       [subexprs v] (lift-expressions env known-vars v)]
-                   [(into exprs
-                      (clj/for [[path subexpr] subexprs]
-                        [(cons k path) subexpr]))
-                    (assoc x k v)]))
-      [{} x] x)
-    (seq? x)
-    (let [env' (update env :locals into (map (fn [sym] [sym {:name sym}])) (keys known-vars))
-          x' (ana/macroexpand-1 env' x)]
-      (if (= x x')
-        [{nil x} nil]
-        (recur env known-vars x')))
-    (symbol? x) [{nil x} nil]
-    :else [{} x]))
+  [env x]
+  (let [known-vars (:known-vars env)]
+    (cond
+      (associative? x)
+      (reduce-kv (fn [[exprs x] k v]
+                   (let [v (if (and (keyword? k) (.startsWith (name k) "on-"))
+                             (handler v)
+                             v)
+                         [subexprs v] (lift-expressions env v)]
+                     [(into exprs
+                        (clj/for [[path subexpr] subexprs]
+                          [(cons k path) subexpr]))
+                      (assoc x k v)]))
+        [{} x] x)
+      (seq? x)
+      (let [host-env' (update (:host-env env) :locals into (map (fn [sym] [sym {:name sym}])) (keys known-vars))
+            x' (ana/macroexpand-1 host-env' x)]
+        (if (= x x')
+          [{nil x} nil]
+          (recur env x')))
+     (symbol? x) [{nil x} nil]
+     :else [{} x])))
 
-(defn terminal [env known-vars expr]
-  (let [args (used-vars expr known-vars)]
+(defn terminal [env expr]
+  (let [args (used-vars expr (:known-vars env)) ; call vec to fix ordering
+        activation (:activation env)
+        activation-path (second activation)
+        rule (quote-rule
+               `((component-path path#) ;-
+                  ~activation
+                  ((var vector) ~@args v#)
+                  ((var conj) ~activation-path v# path#)))]
     (reify Template
-      (get-schema [_] nil)
-      (emit-cljs [_ schema]
-        `(terminal-template '[~@(map #(apply-aliases % known-vars) args)] (fn [[~@args]] ~expr))))))
+      #_(get-schema [_] nil)
+      (emit-cljs [_]
+        `(terminal-template [~rule] (fn [[~@args]] ~expr))))))
 
-(defn fragment* [env known-vars body options]
-  (let [[exprs body] (lift-expressions env known-vars (vec body))
-        children (clj/for [[paths expr] exprs]
+(defn fragment* [env body options]
+  (let [[exprs body] (lift-expressions env (vec body))
+        &env (:host-env env)
+        children (clj/for [[paths expr n] (map-indexed #(conj %2 %1) exprs)
+                           :let [pathvar (gensym "path")
+                                 [_ ppathvar & args :as activation] (:activation env)
+                                 child-activation
+                                 `((~(gensym (str "child-" n "_")) ~pathvar ~@args)
+                                    ~activation
+                                    ((var conj) ~ppathvar ~n ~pathvar))
+                                 env (assoc env :activation (first child-activation))]]
                    [paths (let [{:keys [meta name]}
                                 (when-some [x (and (seq? expr) (first expr))]
-                                  (when (symbol? x) (some->> x (ana/resolve-var env))))]
-                            (cond 
+                                  (when (symbol? x) (some->> x (ana/resolve-var &env))))]
+                            (cond
                               (::special meta)
-                              (apply @(resolve name) env known-vars (next expr)) ; TODO inclusion
-                              (::template meta)
+                              (apply @(resolve name) env (next expr)) ; TODO inclusion
+                              #_#_(::template meta) ; TODO replace with activation
                               (let [args (::template meta)
                                     clauses
                                     (map
@@ -294,15 +468,17 @@
                                            {:expr expr
                                             :expected args})))
                                 (reify Template
-                                  (get-schema [_] (::schema meta))
-                                  (emit-cljs [_ schema] `(include-template '~clauses ~name))))
+                                  #_(get-schema [_] (::schema meta))
+                                  (emit-cljs [_] `(include-template '~clauses ~name))))
                               :else
-                              (terminal env known-vars expr)))])]
+                              (terminal env expr)))
+                    child-activation])]
     (reify Template
-      (get-schema [_] (transduce (map (comp get-schema second)) (partial merge-with into) (:schema options {}) children))
-      (emit-cljs [_ schema]
+      #_(get-schema [_] (transduce (map (comp get-schema second)) (partial merge-with into) (:schema options {}) children))
+      (emit-cljs [_]
         `(fragment-template ~body
-           [~@(clj/for [[path child] children] [`'~path (emit-cljs child schema)])])))))
+           [~@(clj/for [[path child activation] children]
+                [`'~path (emit-cljs child) (quote-rule activation)])])))))
 
 (defn state-entity-map [env m]
   (into {}
@@ -337,56 +513,47 @@
 (declare for)
 
 (defn state [env known-vars state-map body options]
-  (let [state-entity (state-entity-map env state-map)
-        state-query (state-query-map env state-map)
-        state-query (when (seq state-query) state-query)
-        eid (:db/id state-entity '_)
-        eid (if (and state-query (= '_ eid))
-              'state-eid
-              eid)
-        known-vars (case eid
-                     _ known-vars
-                     (assoc known-vars eid (gensym eid)))
-        state-query (some-> state-query (assoc :db/id eid))
-        state-entity (dissoc state-entity :db/id)
-        args (vec (used-vars state-entity known-vars))
-        child (if state-query
-                (apply for env known-vars state-query body)
-                (fragment* env known-vars body options))]
-    (reify Template
-      (get-schema [_] (get-schema child))
-      (emit-cljs [_ schema]
-        ; TODO state-map may be expression (at least values)
-        `(state-template '~(known-vars eid '_) '~(mapv known-vars args) (fn [~args] ~state-entity) ~(emit-cljs child schema))))))
-
-(defmacro ^:private when-valid
-  [[bindings spec value] & body]
-    `(let [value# ~value
-           spec# ~spec
-           conformed# (s/conform spec# value#)]
-       (if (= ::s/invalid conformed#)
-         (throw (ex-info "Invalid input" {:value value# :spec spec#}))
-         (let [~bindings conformed#]
-           ~@body))))
+  #_(let [state-entity (state-entity-map env state-map)
+         state-query (state-query-map env state-map)
+         state-query (when (seq state-query) state-query)
+         eid (:db/id state-entity '_)
+         eid (if (and state-query (= '_ eid))
+               'state-eid
+               eid)
+         known-vars (case eid
+                      _ known-vars
+                      (assoc known-vars eid (gensym eid)))
+         state-query (some-> state-query (assoc :db/id eid))
+         state-entity (dissoc state-entity :db/id)
+         args (vec (used-vars state-entity known-vars))
+         child (if state-query
+                 (apply for env known-vars state-query body)
+                 (fragment* env known-vars body options))]
+     (reify Template
+       #_(get-schema [_] (get-schema child))
+       (emit-cljs [_]
+         ; TODO state-map may be expression (at least values)
+         `(state-template '~(known-vars eid '_) '~(mapv known-vars args) (fn [~args] ~state-entity) ~(emit-cljs child))))))
 
 (s/def ::fragment-body
   (s/cat
     :options (s/* (s/cat :key keyword? :value any?))
     :body (s/* any?)))
 
-(defn fragment [env known-vars & body]
+(defn fragment [env & body]
   (when-valid [{:keys [body options]} ::fragment-body body]
     (let [{state-map :state :as options} (into {} (map (juxt :key :value)) options)]
       (if state-map
-        (state env known-vars state-map body (dissoc options :state))
-        (fragment* env known-vars body options)))))
+        (do (TODO)
+          (state env state-map body (dissoc options :state)))
+        (fragment* env body options)))))
 
 (s/def ::for-body
   (s/cat
     :options (s/* (s/cat :key keyword? :value any?))
     :body (s/* any?)))
 
-(defn for [env known-vars q & body]
+(defn for [{&env :host-env :keys [activation known-vars]} q & body]
   (when-valid [{:keys [body options]} ::fragment-body body]
     (let [sort-expr (some (fn [{:keys [key value]}]
                            (when (= key :sort) value)) options)
@@ -395,28 +562,37 @@
                            (when-not (= key :sort) [key value]))
                    options)
                  body)
-          q (expand-query env q)
-          vars (fresh-vars q known-vars)
-          known-vars' (into known-vars vars)
-          ?q (apply-aliases q known-vars')
-          child (apply fragment env known-vars' body)]
+          {rule-vars :vars
+           rule-bodies :bodies
+           support-rules :support-rules
+           deps :deps} (analyze-q &env q)
+          known-vars' (into known-vars rule-vars)
+          child-activation (list* (gensym "for-body-activation")
+                             (gensym "path") known-vars')
+          child (apply fragment {:host-env &env
+                                 :known-vars known-vars'
+                                 :activation child-activation} body)]
       (reify Template
-        (get-schema [_] (get-schema child))
-        (emit-cljs [_ schema]
-          (let [own-keys (keyvars q schema known-vars)
-                sort-expr (or sort-expr (vec own-keys))
-                sort-args (vec (used-vars sort-expr known-vars'))
-                own-keys (map #(apply-aliases % known-vars') own-keys)
-                aliased-sort-args (map #(apply-aliases % known-vars') sort-args)] ; known-vars and not known-vars' because we care about vars that were previously known
-            `(for-template '~?q '~own-keys '~aliased-sort-args (fn [[~@sort-args]] ~sort-expr)
-              ~(emit-cljs child schema))))))))
+        #_(get-schema [_] (get-schema child))
+        (emit-cljs [_]
+          (let [sort-args (when sort-expr (vec (used-vars sort-expr known-vars')))
+                sort-fn (when sort-expr
+                          `(fn [[~@sort-args]] ~sort-expr))]
+            `(for-template '~activation '~child-activation
+               '~rule-vars ~rule-bodies
+               {:rules ~support-rules :deps ~deps}
+               '~sort-args ~sort-fn
+               ~(emit-cljs child))))))))
 
-(defmacro deftemplate [name args & body]
+(defmacro deftemplate [template-name args & body]
   (let [aliases (into {} (clj/for [arg args] [arg (gensym arg)]))
-        template (apply fragment &env aliases body)
-        schema (get-schema template)]
-    `(def ~(vary-meta name assoc ::template (mapv aliases args) ::schema schema)
-      ~(emit-cljs template schema))))
+        qname (symbol (-> *ns* ns-name name) (name template-name))
+        env {:host-env &env
+             :activation (list* qname (gensym "path") args)
+             :known-vars (set args)}
+        template (apply fragment env body)]
+    `(def ~(vary-meta template-name assoc ::activation (:activation env))
+       ~(emit-cljs template))))
 
 (defmacro defhandler
   "Defines a function suitable to be called in a handler expression.
@@ -445,113 +621,3 @@
     `(io-trigger* '~q '~vars
        (fn ~vars ~@body))))
 
-(defn- resolver [env]
-  (if (:ns env)
-    (fn [sym]
-      (if (impl/special? sym)
-        sym
-        (let [{:keys [name meta]} (ana/resolve-var env sym (ana/confirm-var-exists-throw))]
-          (if (::rule meta)
-            name
-            (list 'var name)))))
-    (fn [sym]
-      (if (impl/special? sym)
-        sym
-        (if-some [v (ns-resolve *ns* env sym)]
-          (let [m (meta v)
-                name (symbol (-> m :ns ns-name name) (-> m :name name))]
-            (if (::rule m)
-              name
-              (list 'var name)))
-         (throw (ex-info (str "Unable to resolve symbol: " sym) {:sym sym :ns *ns*})))))))
-
-#_(defn resolve-pred [sym]
-   (cond
-     (vector? sym) sym ; for internal derived preds
-     (special? sym) sym
-     (:ns *env*) ; cljs
-     (:name (ana/resolve-var *env* sym (ana/confirm-var-exists-throw)))
-     :else
-     (if-some [m (-> sym resolve meta)]
-       (symbol (name (ns-name (:ns m))) (name (:name m)))
-       (throw (ex-info (str "Can't resolve \"" sym "\"") {:sym sym :env *env* :ns *ns*})))))
-
-(s/def ::args (s/coll-of simple-symbol? :kind vector?))
-
-(s/def ::defrule
-  (s/cat :name simple-symbol? :doc (s/? string?)
-    :args ::args :clauses (s/? (s/+ any?))))
-
-(s/def ::defcase
-  (s/cat :name symbol? :hint (s/? keyword?)
-    :args ::args :clauses (s/+ any?)))
-
-(defmacro defrule
-  "Defines an EZ rule with an optional implementation."
-  {:arglists '([name doc? [args*]]
-                [name doc? [args*] clause+])}
-  [& body]
-  (when-valid [{:keys [doc args clauses] the-name :name} ::defrule body]
-    (let [decl `(def ~(cond-> (vary-meta the-name assoc :arglists `'~(list args) ::rule true)
-                        doc (vary-meta assoc :doc doc)) {})]
-      (if clauses
-        `(do ~decl (defcase ~the-name ::defrule ~args ~@clauses))
-        decl))))
-
-(defn- quote-clause [[pred & args :as clause]]
-  (cond
-    (= 'not pred) `(list 'not ~(quote-clause (first args)))
-    (symbol? pred) `(list '~pred ~@(map (fn [x] (if (symbol? x) (list 'quote x) x)) args))
-    (= 'var (first pred)) `(list 'call ~pred
-                             ~@(map (fn [x] (if (symbol? x) (list 'quote x) x)) args))
-    :else (throw (ex-info (str "Unable to quote " clause) {:clause clause}))))
-
-(defn- quote-rule [[head & clauses]]
-  `(list '~head ~@(map quote-clause clauses)))
-
-(defn analyze-case
-  "Returns a map with two keys:
-   :deps, a collection of qualified symbols of rules the input case depends upon,
-   :expansion, a clojure expression that evaluates to a detalog expression."
-  [&env full-name args clauses]
-  (let [rule (cons (cons full-name args) clauses)
-        resolve (resolver &env)
-        vdeps (volatile! #{})
-        resolve (fn [x]
-                  (let [x (resolve x)]
-                    (when (qualified-symbol? x)
-                      (vswap! vdeps conj x))
-                    x))
-        all-rules (into [] (map quote-rule) (impl/lift-all [rule] resolve))] ; side effects don't reorder across this binding
-    {:expansion all-rules
-     :deps @vdeps}))
-
-(defmacro defcase
-  {:arglists '([name hint? [args*] clause+])}
-  [& body]
-  (when-valid [{:keys [hint args clauses] the-name :name} ::defcase body]
-    (let [hint (or hint (keyword (gensym "case")))
-          full-name (symbol (-> *ns* ns-name name) (name the-name))
-          {:keys [deps expansion]} (analyze-case &env full-name args clauses)
-          expr `{::case '~(cons (cons full-name args) clauses)
-                 ::expansion ~expansion
-                 ::deps [~@(map (fn [x] `(var ~x)) deps)]}]
-      `(do
-         ~(if (:ns &env)
-            `(set! ~the-name (assoc ~the-name ~hint ~expr))
-            `(alter-var-root (var ~the-name) assoc ~hint ~expr))
-         (var ~the-name)))))
-
-; should move to cljc
-(defn collect-case-ruleset [{::keys [expansion deps] :as rule-value}]
-  (loop [rule-set (set expansion) done #{} todo deps]
-    (if (seq todo)
-      (let [cases (mapcat (fn [dep] (vals @dep)) deps)]
-        (recur
-          (into rule-set (mapcat ::expansion) cases)
-          (into done deps)
-          (remove done (mapcat ::deps cases))))
-      rule-set)))
-
-(defn collect-ruleset [rule]
-  (transduce (map collect-case-ruleset) into #{} (vals rule)))

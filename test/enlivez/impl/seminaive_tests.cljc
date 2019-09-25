@@ -45,7 +45,7 @@
                              [:db/add (str item) :db/ident (keyword item)])))))]
     (is (= ('? (impl/eval-rules
                  (impl/make-db db)
-                 (lift-all
+                 (impl/lift-all
                    '[([? x' y'] (rsg x y) (:db/ident x x') (:db/ident y y'))
                      ([rsg x y] ;-
                        (or (:flat x y) (rsg (:_down y) (:up x))))])))
