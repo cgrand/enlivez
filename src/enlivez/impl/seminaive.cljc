@@ -53,7 +53,7 @@
   [[op & args :as clause]]
   (case op
     not (recur (first args))
-    (filter #(and (symbol? %) (not= '_ %)) args)))
+    (filter symbol? args)))
 
 (defn lift-all
   "Expand rules (which may contain nested expressions, ands, ors, nots or freshes) into
@@ -260,13 +260,11 @@
   (reduce
     (fn [bindings [x v]]
       (if (symbol? x)
-        (if (= '_ x)
-          bindings
-          (if-some [x (bindings x)] ; no nils
-            (if (= x v)
-              bindings
-              (reduced nil))
-            (assoc bindings x v)))
+        (if-some [x (bindings x)] ; no nils
+          (if (= x v)
+            bindings
+            (reduced nil))
+          (assoc bindings x v))
         (if (= x v)
           bindings
           (reduced nil))))
@@ -290,8 +288,6 @@
                            (cond
                              (not (symbol? ret))
                              (when (= r ret) bindings)
-
-                             (= '_ ret) bindings
 
                              (contains? bindings ret)
                              (when (= r (bindings ret)) bindings)
@@ -363,9 +359,8 @@
             (fn [[indexes bound-vars] [pred & args :as clause]]
               [(update indexes pred (fnil conj #{})
                  (binding-profile bound-vars clause))
-               (if (= 'not pred)
-                 bound-vars
-                 (-> bound-vars (into (filter symbol?) args) (disj '_)))] )
+               (cond-> bound-vars
+                 (not= pred 'not) (into (filter symbol?) args))] )
            [{} #{}] clauses))))
     (partial merge-with into) {} rules))
 
@@ -512,7 +507,7 @@
             identity args)
           outs (reduce-kv
                  (fn [m i arg]
-                   (if (and (symbol? arg) (not= '_ arg) (not (bound-vars arg)))
+                   (if (and (symbol? arg) (not (bound-vars arg)))
                      (assoc m arg (conj m arg []) i)
                      m))
                  {} args)
