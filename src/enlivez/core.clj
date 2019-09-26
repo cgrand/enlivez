@@ -132,8 +132,8 @@
                         all-rules)
         bodies (into [] 
                  (comp
-                   (keep (fn [[h & body :as rule]]
-                           (when (= h tmp-name) body)))
+                   (keep (fn [[[h] & clauses :as rule]]
+                           (when (= h tmp-name) clauses)))
                    (map quote-clauses))
                  all-rules)] 
     {:vars args

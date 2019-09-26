@@ -244,7 +244,7 @@
     (collect-rules [t]
       (mapcat (fn [[path child [activation-head :as activation]]]
                 (list* activation
-                  (list (list `component-path (second activation-head)) activation)
+                  (list (list `component-path (second activation-head)) activation-head)
                   (collect-rules child))) children))
     (instantiate! [t mount! ks]
       (fragment-component body children mount! ks))))
@@ -507,4 +507,23 @@
   => (ez/deftemplate xoxo [] (for [(_ :user/name name)] [:h1 "hello" name]))
   => (`ez/component-path (impl/eval-rules {`xoxo #{[[] "You"]}} (ez/collect-rules xoxo)))
   #{([0 ["You"]])}
-  )
+  
+  => (def edb
+       (-> (d/empty-db {})
+         (d/db-with
+           [[:db/add "1" :user/name "Lucy"]
+            [:db/add "2" :user/name "Ethel"]
+            [:db/add "3" :user/name "Fred"]])
+         impl/make-db))
+  => (ez/deftemplate xoxo [] (ez/for [(:user/name _ name)] [:h1 "hello" name]))
+  => (`ez/component-path (impl/eval-rules (assoc edb `xoxo #{[[]]}) (ez/collect-rules xoxo)))
+  #{([0])
+    ([0 [1]])
+    ([0 [1] 0])
+    ([0 [1] 0 ["Lucy"]])
+    ([0 [3]])
+    ([0 [3] 0])
+    ([0 [3] 0 ["Fred"]])
+    ([0 [2]])
+    ([0 [2] 0])
+    ([0 [2] 0 ["Ethel"]])})

@@ -108,7 +108,9 @@
                                 (recur aliases (into done nots) more-clauses)))
                         (if-some [clauses (unnest clause)]
                           (recur aliases done (concat clauses more-clauses))
-                          (recur aliases (conj done (map #(aliases % %) clause)) more-clauses)))))
+                          (recur aliases (conj done (map #(if (= '_ %)
+                                                            (gensym '_)
+                                                            (aliases % %)) clause)) more-clauses)))))
                   [done]))]
         (concat
           (for [[head & clauses] rules
@@ -573,15 +575,15 @@
           (symbol? e)
           (if (symbol? v)
             (if (card1? a)
-              [e v]
-              {e e
-               v v})
+              [[e v]]
+              [[e e]
+               [v v]])
             (if (uniq? a)
-              [:known e]
-              [e e]))
+              [[:known e]]
+              [[e e]]))
           (symbol? v) ; and not symbol? e
           (when-not (card1? a)
-            [v v]))
+            [[v v]]))
         (throw (ex-info "Unsupported dynamic attribute." {:a a}))))
     ; don't try going down rules at the moment
     (zipmap args args)))
