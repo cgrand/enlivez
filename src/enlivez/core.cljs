@@ -525,4 +525,43 @@
     ([0 [3] 0 ["Fred"]])
     ([0 [2]])
     ([0 [2] 0])
-    ([0 [2] 0 ["Ethel"]])})
+    ([0 [2] 0 ["Ethel"]])}
+  
+    => (def edb
+       (-> (d/empty-db {:list/tail {:db/valueType :db.type/ref}})
+         (d/db-with
+           [[:db/add "1" :user/name "Lucy"]
+            [:db/add "1" :list/tail "2"]
+            [:db/add "2" :user/name "Ethel"]
+            [:db/add "2" :list/tail "3"]
+            [:db/add "3" :user/name "Fred"]])
+         impl/make-db))
+  => (ez/deftemplate reclist [root]
+       [:h1 root]
+       (ez/for [(:list/tail root tail)]
+         (reclist tail)))
+  => (`ez/component-path (impl/eval-rules (assoc edb `reclist #{[[]]}) (ez/collect-rules reclist)))
+  => (`ez/component-path (impl/eval-rules (assoc edb `reclist #{[[] 1]}) (take 11 rules)))
+#{([0])
+  ([1])
+  ([0 [1]]) ;h1
+  ([1 []])
+  ([1 [] 0])
+  ([1 [] 0 0])
+  ([1 [] 0 1])
+  ([1 [] 0 0 [2]]) ;h1
+  ([1 [] 0 1 []])
+  ([1 [] 0 1 [] 0])
+  ([1 [] 0 1 [] 0 0])
+  ([1 [] 0 1 [] 0 1]) ;h1
+  ([1 [] 0 1 [] 0 0 [3]])}
+  
+  
+  
+  => (ez/deftemplate tree [root]
+       [:dt (ez/for [(:branch/name root name)] name)]
+       [:dd
+        [:dl
+         (ez/for [(:branch/child root branch)]
+           (tree branch))]]))
+

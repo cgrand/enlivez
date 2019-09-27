@@ -309,9 +309,9 @@
     (let [rec-preds (into #{} (map ffirst) delta-rules)
           db (into db
                (map (fn [op]
-                      {op #{}
+                      {op (db op #{})
                        [:prev op] #{}
-                       [:delta op] #{}}))
+                       [:delta op] (db op #{})}))
                rec-preds)
           db (transduce
                (map (fn [[[op] :as rule]]
