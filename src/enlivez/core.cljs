@@ -30,8 +30,9 @@
       (when-not *reentrant*
         (let [pending-txs
               (binding [*reentrant* []]
-                (doseq [[eid q f pq] (d/q '[:find ?eid ?q ?f ?pq :where [?eid ::live-query ?q] [?eid ::prepared-live-query ?pq] [?eid ::handler ?f]] db-after)]
-                  (f (pq db-after)))
+                (doseq [[rules seeds f] (d/q '[:find ?rules ?seeds :where [?eid ::rules ?rules] [?eid ::seeds ?seeds] [?eid ::handler ?f]] db-after)]
+                  (f (`ez/component-path
+                       (impl/eval-rules (into (impl/make-db db-after) seeds) rules))))
                 *reentrant*)]
           (doseq [tx pending-txs]
             (d/transact! conn tx)))))))
@@ -62,8 +63,8 @@
 
 (defprotocol Template
   #_(additional-schema [t] "Returns schema declarations that should augment the current db")
-  (collect-rules [t] "Returns a map keyed by pairs [key-vector-expr clauses], values are query-trees.")
-  (instantiate! [t mount! ks]))
+  (collect-rules [t] "Returns a collection of rules.")
+  (instantiate! [t mount!]))
 
 #_(defn- qt-to-rules* [template parent-rule]
    (let [rulename (gensym 'rule)]
@@ -78,11 +79,11 @@
 
 
 (defprotocol Component
-  (ensure! [c ks] "Returns the child component for (peek ks)")
+  (ensure! [c k] "Returns (creating it if necessary) the child component for k.")
   (delete! [c] "Deletes this component"))
 
 (defn ensure-path! [component path]
-  (reduce ensure! component (next (reductions conj [] path))))
+  (reduce ensure! component path))
 
 (defn delete-path! [component path]
   (some-> (reduce get component path) delete!))
@@ -90,7 +91,7 @@
 (defn- update-top [v f & args]
   (conj (pop v) (apply f (peek v) args)))
 
-(defn for-component [child sort-f ump! flat-ks]
+(defn for-component [child sort-f ump!]
   (let [children (atom {})
         sort-ks (atom {})
         ordered-ks (atom nil)
@@ -120,9 +121,8 @@
                 (case dir
                   ;; when switching sort order in between the ordered-ks are a mixed bag
                   0 (reify Component
-                      (ensure! [c ks]
-                        (let [sort-args (peek ks)
-                              sort-k (sort-f sort-args)
+                      (ensure! [c sort-args]
+                        (let [sort-k (sort-f sort-args)
                               prev-sort-k (@sort-ks child-k)
                               ord (swap! ordered-ks
                                     #(-> %
@@ -136,53 +136,46 @@
                         (delete! child)))
                   1 child)))
             Component
-            (ensure! [c ks]
-              (get c (peek ks)))
+            (ensure! [c k]
+              (get c k))
             (delete! [c] nil)))]
     (reify
       ILookup
       (-lookup [c k]
         (some->> (@children k) (child-component k)))
       Component
-      (ensure! [c ks]
-        (let [k (peek ks)]
-          (child-component k
-            (or (@children k)
-              (let [child (instantiate! child
-                            #(let [doms (swap! doms assoc k %)]
-                               (ump! (map (comp doms second) @ordered-ks)))
-                            (update-top flat-ks into (conj k 1)))]
-                (swap! children assoc k child)
-                child)))))
+      (ensure! [c k]
+        (child-component k
+          (or (@children k)
+            (let [child (instantiate! child
+                          #(let [doms (swap! doms assoc k %)]
+                             (ump! (map (comp doms second) @ordered-ks))))]
+              (swap! children assoc k child)
+              child))))
       (delete! [c] nil))))
 
-(defn fragment-component [dom children ump! flat-ks]
+(defn fragment-component [dom children ump!]
   (let [adom (atom dom)
         children
         (into []
-          (map-indexed
-            (fn [i [path child]]
-              (instantiate! child #(ump! (swap! adom assoc-in path %))
-                (update-top flat-ks conj i))))
+          (map
+            (fn [[path child]]
+              (instantiate! child #(ump! (swap! adom assoc-in path %)))))
           children)]
     (ump! dom)
     (reify
       ILookup
-      (-lookup [c k]
-        (let [[i] k]
-          (if (some? i)
-            (nth children i)
-            c)))
+      (-lookup [c i] (nth children i))
       Component
-      (ensure! [c ks] (get c (peek ks)))
+      (ensure! [c i] (nth children i))
       (delete! [c] nil))))
 
-(defn terminal-component [f ump! flat-ks]
+(defn terminal-component [f ump!]
   (reify
     ILookup
-    (-lookup [c k] nil)
+    (-lookup [c args] nil)
     Component
-    (ensure! [c ks] (ump! (f (peek ks))) nil)
+    (ensure! [c args] (ump! (f args)) nil)
     (delete! [c] nil)))
 
 (defn state-component [state-f child ump! [parent-flat-k flat-k]]
@@ -197,7 +190,7 @@
         (or @vchild
           (let [[eid & args] (peek ks)]
             (transact-right-after! [(assoc (state-f args) :db/id eid)])
-            (vreset! vchild (instantiate! child ump! [flat-k (conj flat-k :/)])))))
+            (vreset! vchild (instantiate! child ump!)))))
       (delete! [c]
         (try
           (delete! @vchild)
@@ -235,8 +228,8 @@
         ()
         {[q ks] {0 {[[] sort-ks] nil}
                  1 (query-tree child)}})
-      (instantiate! [t mount! ks]
-        (for-component child sort-f mount! ks)))))
+      (instantiate! [t mount!]
+        (for-component child sort-f mount!)))))
 
 (defn fragment-template [body children]
   (reify Template
@@ -246,16 +239,16 @@
                 (list* activation
                   (list (list `component-path (second activation-head)) activation-head)
                   (collect-rules child))) children))
-    (instantiate! [t mount! ks]
-      (fragment-component body children mount! ks))))
+    (instantiate! [t mount!]
+      (fragment-component body children mount!))))
 
 (defn terminal-template [rules f]
   (reify
     Template
     #_(additional-schema [t] {})
     (collect-rules [t] rules)
-    (instantiate! [t mount! ks]
-      (terminal-component f mount! ks))))
+    (instantiate! [t mount!]
+      (terminal-component f mount!))))
 
 (defn state-template [eid args state-entity-f child]
   #_(reify
@@ -274,7 +267,7 @@
     Template
     #_(additional-schema [t] {})
     (collect-rules [t] rules)
-    (instantiate! [t mount! ks]
+    (instantiate! [t mount!]
       #_(instantiate! child mount! ks))))
 
 (declare ^::special for ^::special fragment ^::special terminal)
@@ -368,58 +361,42 @@
    This changes are represented by a set of vectors, each vector being a path with
    an additional top item: a boolean, true for addition, false for deletion.
    Upon transaction of the subscription, f receives a first delta (positive only) representing the current state."
-  [hq f]
-  (let [[find where path-fn] (flatten-q hq)]
-    [{::live-query (concat [:find] find [:where] where)
-      ::prepared-live-query (q/prepare-query find where)
-      ::hierarchical-query hq
-      ::handler
-      (let [aprev-rows (atom #{})]
-        (fn [rows]
-#_#_        (prn 'FIND find 'WHERE where)
-          (prn 'ROWS rows)
-          (let [prev-rows @aprev-rows
-                ; I could also use a flat sorted map with the right order
-                paths+ (into {}
-                         (comp
-                           (remove prev-rows)
-                           (map path-fn)
-                           (map (fn [path] [(pop path) path])))
-                         rows)
-                paths- (into #{}
-                         (comp
-                         (remove rows)
-                           (map path-fn)
-                           (keep (fn [path]
-                                   (let [k (pop path)]
-                                     (when-not (contains? paths+ k) (conj k false))))))
-                         prev-rows)
-                delta (into paths- (map (fn [[_ path]] (conj path true))) paths+)]
-            (reset! aprev-rows rows)
-            (when (not= #{} delta)
-              (when *print-delta*
-                (prn 'DELTA delta))
-              (f delta)))))}]))
+  [rules seeds f]
+  [{::rules rules
+    ::seeds seeds
+    ::handler
+    (let [aprev-paths (atom #{})]
+      (fn [paths]
+        (let [prev-paths @aprev-paths
+              delta 
+              {true (into #{} (remove prev-paths) paths)
+               false (into #{} (remove paths) prev-paths)}]
+          (reset! aprev-paths paths)
+          (when (not= #{} delta)
+            (when *print-delta*
+              (prn 'DELTA delta))
+            (f delta)))))}])
 
-(defn mount [template elt]
-  (let [dom (r/atom nil)
+(defn mount [template-var elt]
+  (let [activation (::activation (meta template-var))
+        template @template-var
+        seeds {(first activation) #{[[]]}} ; crude seeding assuming root template has no arg
+        dom (r/atom nil)
         schema (let [db @conn]
                  (:rschema db)
                  #_(doto (into (:schema db) (additional-schema template))
                     (->> (d/init-db (d/datoms db :eavt)) (d/reset-conn! conn))))
         {root-eid -1} (:tempids (d/transact! conn [[:db/add -1 ::key []]]))
-        [component txs] (binding [*reentrant* []]
-                          [(instantiate! template #(reset! dom %) [[] []]) *reentrant*])
+        [root-component txs] (binding [*reentrant* []]
+                               [(instantiate! template #(reset! dom %)) *reentrant*])
         update! (fn [delta]
-                  (doseq [path delta
-                          :let [upsert (peek path)
-                                path (pop path)
-                                f (if upsert ensure-path! delete-path!)]]
-                    (f component path)))
-        qt (collect-rules template) ; to pass schema or not to pass schema ?
-        _ (prn 'QT7 (gen-rules qt))
-        subscriptions (vec (mapcat #(subscription % update!) (flatten-hq qt)))]
-    (d/transact! conn subscriptions)
+                  (doseq [[added paths] delta
+                          :let [f (if added ensure-path! delete-path!)]
+                          path paths]
+                    (f root-component path)))
+        ; to pass schema or not to pass schema ?
+        rules (collect-rules template)]
+    (d/transact! conn (subscription rules seeds update!))
     (doseq [tx txs] (d/transact! conn tx))
     (r/render [#(first (simplify @dom))] elt)))
 
@@ -480,13 +457,14 @@
     (io-trigger* q binding send (constantly nil)))
   ([q binding send stop]
     (let [tx! #(d/transact! conn %)]
-      (tx!
-        (subscription [[q binding] [[] []]]
-          (fn [delta]
-            (doseq [[tuple _ addition] delta]
-              (if addition
-                (apply send tuple)
-                (apply stop tuple)))))))))
+      (throw (ex-info "TODO" {}))
+#_      (tx!
+         (subscription [[q binding] [[] []]]
+           (fn [delta]
+             (doseq [[tuple _ addition] delta]
+               (if addition
+                 (apply send tuple)
+                 (apply stop tuple)))))))))
 
 ; should move to cljc
 (defn collect-case-ruleset [{::keys [expansion deps] :as rule-value}]
