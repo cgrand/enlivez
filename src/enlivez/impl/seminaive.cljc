@@ -25,7 +25,7 @@
       (list `datom (nth args 1 missing) k (nth args 0)))
     (list `datom (nth args 0) k (nth args 1 missing))))
 
-(defn- unnest
+(defn unnest
   "If clause has nested expressions then unnest them (not recursively) else nil."
   [[pred & args]]
   (let [vclauses (volatile! [])

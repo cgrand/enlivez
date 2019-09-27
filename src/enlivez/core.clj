@@ -84,18 +84,22 @@
   "Returns a map with two keys:
    :deps, a collection of qualified symbols of rules the input case depends upon,
    :expansion, a clojure expression that evaluates to a datalog expression."
-  [&env full-name args clauses]
-  (let [rule (cons (cons full-name args) clauses)
-        resolve (resolver &env)
-        vdeps (volatile! #{})
-        resolve (fn [x]
-                  (let [x (resolve x)]
-                    (when (and (qualified-symbol? x) (not (impl/special-pred? x)))
-                      (vswap! vdeps conj x))
-                    x))
-        all-rules (into [] (map quote-rule) (impl/lift-all [rule] resolve))] ; side effects don't reorder across this binding
-    {:expansion all-rules
-     :deps @vdeps}))
+  ([&env full-name args clauses]
+    (analyze-case &env full-name args clauses #{}))
+  ([&env full-name args clauses whitelist]
+    (let [rule (cons (cons full-name args) clauses)
+          resolve (resolver &env)
+          vdeps (volatile! #{})
+          resolve (fn [x]
+                    (if (whitelist x)
+                      x
+                      (let [x (resolve x)]
+                        (when (and (qualified-symbol? x) (not (impl/special-pred? x)))
+                          (vswap! vdeps conj x))
+                        x)))
+          all-rules (into [] (map quote-rule) (impl/lift-all [rule] resolve))] ; side effects don't reorder across this binding
+      {:expansion all-rules
+       :deps @vdeps})))
 
 (defmacro bleh []
   (let [resolve (resolver &env)]
@@ -310,7 +314,7 @@
                       (assoc x k v)]))
         [{} x] x)
       (seq? x)
-      (let [host-env' (update (:host-env env) :locals into (map (fn [sym] [sym {:name sym}])) (keys known-vars))
+      (let [host-env' (update (:host-env env) :locals into (map (fn [sym] [sym {:name sym}])) known-vars)
             x' (ana/macroexpand-1 host-env' x)]
         (if (= x x')
           [{nil x} nil]
@@ -349,22 +353,25 @@
                             (cond
                               (::special meta)
                               (apply @(resolve name) env (next expr)) ; TODO inclusion
-                              #_#_(::template meta) ; TODO replace with activation
-                              (let [args (::template meta)
-                                    clauses
-                                    (map
-                                      (fn [e arg]
-                                        (if (seq? e)
-                                          [(apply-aliases e known-vars) arg]
-                                          (list '= (known-vars e e) arg)))
-                                      (next expr) args)]
-                                (when-not (= (count args) (count (next expr)))
-                                  (throw (ex-info (str "Arity mismatch: " (first expr) " got " (count (next expr)) " arguments.")
-                                           {:expr expr
-                                            :expected args})))
+                              (::activation meta)
+                              (let [call-site-activation (:activation env)
+                                    callee-activation (::activation meta)
+                                    unnested-call (or (impl/unnest expr) [expr])
+                                    clauses (pop unnested-call)
+                                    args (next (peek unnested-call))
+                                    {:keys [deps expansion]}
+                                    (analyze-case &env
+                                      (first callee-activation)
+                                      (cons (second call-site-activation) args)
+                                      (cons call-site-activation
+                                        clauses)
+                                      #{(first call-site-activation)})]
+                                ; This is interesting but not fully handled: using nested stuff we can trigger implicit iteration
+                                ; should expressions be allowed as args?
+                                ; only when returning 1 result? or 0?
                                 (reify Template
                                   #_(get-schema [_] (::schema meta))
-                                  (emit-cljs [_] `(include-template '~clauses ~name))))
+                                  (emit-cljs [_] `(include-template ~deps ~expansion))))
                               :else
                               (terminal env expr)))
                     child-activation])]
@@ -479,15 +486,18 @@
                '~sort-args ~sort-fn
                ~(emit-cljs child))))))))
 
+(defmacro template [activation args & body]
+  (let [env {:host-env &env
+             :activation activation
+             :known-vars (set args)}]
+    (emit-cljs (apply fragment env body))))
+
 (defmacro deftemplate [template-name args & body]
-  (let [aliases (into {} (clj/for [arg args] [arg (gensym arg)]))
-        qname (symbol (-> *ns* ns-name name) (name template-name))
-        env {:host-env &env
-             :activation (list* qname (gensym "path") args)
-             :known-vars (set args)}
-        template (apply fragment env body)]
-    `(def ~(vary-meta template-name assoc ::activation (:activation env))
-       ~(emit-cljs template))))
+  (let [qname (symbol (-> *ns* ns-name name) (name template-name))
+        activation (list* qname (gensym "path") args)]
+   `(do ; better trick to make self resolution works? 
+      (def ~(vary-meta template-name assoc ::activation activation))
+      (set! ~template-name (template ~activation ~args ~@body)))))
 
 (defmacro defhandler
   "Defines a function suitable to be called in a handler expression.

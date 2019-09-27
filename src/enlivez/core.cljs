@@ -269,14 +269,13 @@
      (instantiate! [t mount! ks]
        (state-component state-entity-f child mount! ks))))
 
-(defn include-template [clauses child]
-  #_(reify
-     Template
-     #_(additional-schema [t] {})
-     (collect-rules [t]
-       {[clauses nil] (query-tree child)})
-     (instantiate! [t mount! ks]
-       (instantiate! child mount! ks))))
+(defn include-template [deps rules]
+  (reify
+    Template
+    #_(additional-schema [t] {})
+    (collect-rules [t] rules)
+    (instantiate! [t mount! ks]
+      #_(instantiate! child mount! ks))))
 
 (declare ^::special for ^::special fragment ^::special terminal)
 
