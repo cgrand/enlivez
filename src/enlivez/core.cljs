@@ -30,9 +30,10 @@
       (when-not *reentrant*
         (let [pending-txs
               (binding [*reentrant* []]
-                (doseq [[rules seeds f] (d/q '[:find ?rules ?seeds :where [?eid ::rules ?rules] [?eid ::seeds ?seeds] [?eid ::handler ?f]] db-after)]
-                  (f (`ez/component-path
-                       (impl/eval-rules (into (impl/make-db db-after) seeds) rules))))
+                (doseq [[rules seeds f] (d/q '[:find ?rules ?seeds ?f :where [?eid ::rules ?rules] [?eid ::seeds ?seeds] [?eid ::handler ?f]] db-after)]
+                  (let [paths (`component-path
+                                (impl/eval-rules (into (impl/make-db db-after) seeds) rules))]
+                    (f paths)))
                 *reentrant*)]
           (doseq [tx pending-txs]
             (d/transact! conn tx)))))))
@@ -83,75 +84,35 @@
   (delete! [c] "Deletes this component"))
 
 (defn ensure-path! [component path]
+  (prn '>>>> 'ENSURE path)
   (reduce ensure! component path))
 
 (defn delete-path! [component path]
-  (some-> (reduce get component path) delete!))
+  (prn '>>>> 'DELETE path)
+  (some-> (ensure-path! component path) delete!))
 
 (defn- update-top [v f & args]
   (conj (pop v) (apply f (peek v) args)))
 
 (defn for-component [child sort-f ump!]
   (let [children (atom {})
-        sort-ks (atom {})
-        ordered-ks (atom nil)
-        _ (reset! ordered-ks
-            (sorted-set-by
-              #(try
-                (compare %1 %2)
-                (catch :default e
-                  (let [[sort-k k] %1]
-                    (if (= (@sort-ks k) sort-k) ; existing key
-                      1 -1))))))
-        doms (atom {})
-        delete-child
-        (fn [k]
-          (let [sort-k (@sort-ks k)
-                ord (swap! ordered-ks disj [sort-k k])]
-            (swap! sort-ks dissoc k)
-            (swap! children dissoc k)
-            (swap! doms dissoc k)
-            (ump! (map (comp @doms second) ord))))
-        child-component
-        (fn [child-k child]
-          (reify
-            ILookup
-            (-lookup [c k]
-              (let [[dir] k]
-                (case dir
-                  ;; when switching sort order in between the ordered-ks are a mixed bag
-                  0 (reify Component
-                      (ensure! [c sort-args]
-                        (let [sort-k (sort-f sort-args)
-                              prev-sort-k (@sort-ks child-k)
-                              ord (swap! ordered-ks
-                                    #(-> %
-                                       (disj [prev-sort-k child-k])
-                                       (conj [sort-k child-k])))]
-                          (swap! sort-ks assoc child-k sort-k)
-                          (ump! (map (comp @doms second) ord)))
-                        nil)
-                      (delete! [c]
-                        (delete-child child-k)
-                        (delete! child)))
-                  1 child)))
-            Component
-            (ensure! [c k]
-              (get c k))
-            (delete! [c] nil)))]
+        doms (atom {})]
     (reify
-      ILookup
-      (-lookup [c k]
-        (some->> (@children k) (child-component k)))
       Component
       (ensure! [c k]
-        (child-component k
-          (or (@children k)
-            (let [child (instantiate! child
-                          #(let [doms (swap! doms assoc k %)]
-                             (ump! (map (comp doms second) @ordered-ks))))]
-              (swap! children assoc k child)
-              child))))
+        (or (@children k)
+          (let [child (instantiate! child
+                        #(let [doms (swap! doms assoc k %)]
+                           (ump! (vals doms))))
+                bound-child (reify Component
+                              (ensure! [c k] (ensure! child k))
+                              (delete! [c]
+                                (let [doms (swap! doms dissoc k)]
+                                  (swap! children dissoc k)
+                                  (ump! (vals doms))
+                                  (delete! child))))]
+           (swap! children assoc k bound-child)
+           child)))
       (delete! [c] nil))))
 
 (defn fragment-component [dom children ump!]
@@ -164,16 +125,12 @@
           children)]
     (ump! dom)
     (reify
-      ILookup
-      (-lookup [c i] (nth children i))
       Component
       (ensure! [c i] (nth children i))
       (delete! [c] nil))))
 
 (defn terminal-component [f ump!]
   (reify
-    ILookup
-    (-lookup [c args] nil)
     Component
     (ensure! [c args] (ump! (f args)) nil)
     (delete! [c] nil)))
@@ -183,8 +140,6 @@
                           [:db/add [::key parent-flat-k] ::child -1]])
   (let [vchild (volatile! nil)]
     (reify
-      ILookup
-      (-lookup [c k] @vchild)
       Component
       (ensure! [c ks]
         (or @vchild
@@ -247,8 +202,7 @@
     Template
     #_(additional-schema [t] {})
     (collect-rules [t] rules)
-    (instantiate! [t mount!]
-      (terminal-component f mount!))))
+    (instantiate! [t mount!] (terminal-component f mount!))))
 
 (defn state-template [eid args state-entity-f child]
   #_(reify
@@ -283,71 +237,6 @@
     [(into [(first x)] (mapcat simplify (rest x)))]
     :else (mapcat simplify x)))
 
-(defn- gen-rules
-  "interim fn to map from query trees to rules"
-  ([qt] (gen-rules qt nil))
-  ([qt [_ parent-path & parent-args :as parent-head]]
-    (mapcat (fn [[k v]]
-              (let [[q ks] (if (number? k) [nil k] k)
-                    q (if (= `ensure-state (first q)) [q] q)
-                    args (distinct (concat parent-args
-                                     (filter #(and (symbol? %) (not= '_ %))
-                                       (tree-seq seq? next
-                                         (cons 'and q))))) ; not great with not
-                    path-arg (gensym 'path)
-                    rule-head (list* (gensym 'rule) path-arg args)
-                    rule (if parent-head
-                           (concat
-                             (list* rule-head parent-head q)
-                             [(list 'append parent-path ks path-arg)])
-                           (concat
-                             (cons rule-head q)
-                             [(list 'append nil ks path-arg)]))]
-                (cons rule (gen-rules v rule-head))))
-      qt)))
-
-(defn- flatten-hq
-  "interim fn to map from query trees to hierarchical queries"
-  [qt]
-  (or
-    (seq (clj/for [[k v] qt
-                   q (flatten-hq v)]
-           (cons (if (number? k) [nil k] k) q)))
-    [()]))
-
-(defn- flatten-q
-  "Flattens a hierarchical query to a pair [actual-query f] where f
-   is a function to map a row to a path."
-  [hq]
-  (let [[where find ks seg-fns]
-        (reduce
-          (fn [[where find ks seg-fns] [q k]]
-            (let [is-state (= `ensure-state (first q))
-                  q (if is-state
-                      (let [[_ eid & clauses] q
-                            ?sk (gensym "?sk")]
-                        (into [[(cons 'vector ks) ?sk] [eid ::key ?sk]] clauses))
-                      q)
-                  seg-fn (cond
-                           (nil? k) nil
-                           (number? k) (constantly [k])
-                           :else
-                           (let [from (count find)
-                                 to (+ from (count k))]
-                             #(into [] (subvec % from to))))] ; https://clojure.atlassian.net/browse/CLJS-3092
-              [(into where q)
-               (into find (if (number? k) nil k))
-               (into ks (cond is-state [:/] (number? k) [k] :else k))
-               (cond-> seg-fns seg-fn (conj seg-fn))]))
-          [[] [] [] []] hq)
-        [find where]
-        (if (seq find)
-          [find where]
-          (let [v (gensym "?true")]
-            [[v] (into [(list '= true v)] where)]))]
-    [find where
-     (fn [row] (into [] (map #(% row)) seg-fns))]))
-
 (def ^:dynamic *print-delta* false)
 
 (defn subscription
@@ -367,7 +256,8 @@
     ::handler
     (let [aprev-paths (atom #{})]
       (fn [paths]
-        (let [prev-paths @aprev-paths
+        (let [paths (into #{} (map first) paths)
+              prev-paths @aprev-paths
               delta 
               {true (into #{} (remove prev-paths) paths)
                false (into #{} (remove paths) prev-paths)}]
@@ -391,8 +281,9 @@
                                [(instantiate! template #(reset! dom %)) *reentrant*])
         update! (fn [delta]
                   (doseq [[added paths] delta
-                          :let [f (if added ensure-path! delete-path!)]
-                          path paths]
+                          :let [f (if added ensure-path! delete-path!)
+                                order (if added count (comp - count))]
+                          path (sort-by order paths)]
                     (f root-component path)))
         ; to pass schema or not to pass schema ?
         rules (collect-rules template)]
@@ -481,10 +372,6 @@
   (transduce (map collect-case-ruleset) into #{} (vals rule)))
 
 (comment
-  => (ez/deftemplate xoxo [] (for [(_ :user/name name)] [:h1 "hello" name]))
-  => (`ez/component-path (impl/eval-rules {`xoxo #{[[] "You"]}} (ez/collect-rules xoxo)))
-  #{([0 ["You"]])}
-  
   => (def edb
        (-> (d/empty-db {})
          (d/db-with
@@ -541,5 +428,19 @@
        [:dd
         [:dl
          (ez/for [(:branch/child root branch)]
-           (tree branch))]]))
+           (tree branch))]])
+  
+  => (require '[datascript.core :as d])
+  (require'[enlivez.core :as ez])
+  (require '[enlivez.impl.seminaive :as impl])
+  (def edb
+       (-> (d/empty-db {})
+         (d/db-with
+           [[:db/add "1" :user/name "Lucy"]
+            [:db/add "2" :user/name "Ethel"]
+            [:db/add "3" :user/name "Fred"]])
+         impl/make-db))
+  (ez/deftemplate xoxo [] (ez/for [(:user/name _ name)] [:h1 "hello" name]))
+  (ez/mount #'xoxo (.-body js/document))
+  )
 
