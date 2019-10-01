@@ -392,7 +392,7 @@
                                 ; only when returning 1 result? or 0?
                                 (reify Template
                                   #_(get-schema [_] (::schema meta))
-                                  (emit-cljs [_] `(include-template ~name [~@deps] ~expansion))))
+                                  (emit-cljs [_] `(include-template (var ~name) [~@deps] ~expansion))))
                               (seq? expr)
                               (case (first expr)
                                 clojure.core/unquote (terminal env (second expr)) ; cljs escape hatch

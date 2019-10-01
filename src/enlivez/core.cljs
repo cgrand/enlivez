@@ -221,14 +221,14 @@
      (instantiate! [t mount! ks]
        (state-component state-entity-f child mount! ks))))
 
-(defn include-template [template deps rules]
+(defn include-template [template-var deps rules]
   (reify RuleSet
     #_(additional-schema [t] {})
     (collect-rules [t] rules)
     (collect-deps [t] deps)
     Template
     (instantiate! [t mount!]
-      (instantiate! template mount!)
+      (instantiate! @template-var mount!)
       #_(instantiate! child mount! ks))))
 
 (declare ^::special for ^::special fragment ^::special terminal)
