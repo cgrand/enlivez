@@ -295,6 +295,14 @@
   ; TODO make it right: it's an overestimate
   (set (filter known-vars (cons expr (tree-seq coll? seq expr)))))
 
+(defn expand-relational-expression
+  "Returns [query var]"
+  [expr]
+  (let [exprs (impl/unnest (list 'dummy expr))
+        [_dummy var] (peek exprs)
+        exprs (pop exprs)]
+    [exprs var]))
+
 (defn lift-expressions
   "Returns [expressions hollowed-x] where
    expressions is a sequence of [path expression] and hollowed-x is x where symbols and
@@ -372,8 +380,14 @@
                                 (reify Template
                                   #_(get-schema [_] (::schema meta))
                                   (emit-cljs [_] `(include-template ~deps ~expansion))))
-                              :else
-                              (terminal env expr)))
+                              (seq? expr)
+                              (case (first expr)
+                                clojure.core/unquote (terminal env (second expr)) ; cljs escape hatch
+                                (let [[q var] (expand-relational-expression expr)]
+                                  (for env q var)))
+                              (symbol? expr)
+                              (terminal env expr)
+                              :else (throw (ex-info (str "Unexpected expression: " (pr-str expr)) {:expr expr}))))
                     child-activation])]
     (reify Template
       #_(get-schema [_] (transduce (map (comp get-schema second)) (partial merge-with into) (:schema options {}) children))
