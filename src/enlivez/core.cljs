@@ -62,9 +62,12 @@
       (when-some [tx (f e this @conn)]
         (d/transact! conn (if (map? tx) [tx] tx))))))
 
+(defprotocol RuleSet
+  (collect-rules [t] "Returns a collection of rules.")
+  (collect-deps [t] "Returns a collection of deps (as vars)."))
+
 (defprotocol Template
   #_(additional-schema [t] "Returns schema declarations that should augment the current db")
-  (collect-rules [t] "Returns a collection of rules.")
   (instantiate! [t mount!]))
 
 #_(defn- qt-to-rules* [template parent-rule]
@@ -97,8 +100,7 @@
 (defn for-component [child sort-f ump!]
   (let [children (atom {})
         doms (atom {})]
-    (reify
-      Component
+    (reify Component
       (ensure! [c k]
         (or (@children k)
           (let [child (instantiate! child
@@ -124,14 +126,12 @@
               (instantiate! child #(ump! (swap! adom assoc-in path %)))))
           children)]
     (ump! dom)
-    (reify
-      Component
+    (reify Component
       (ensure! [c i] (nth children i))
       (delete! [c] nil))))
 
 (defn terminal-component [f ump!]
-  (reify
-    Component
+  (reify Component
     (ensure! [c args] (ump! (f args)) nil)
     (delete! [c] nil)))
 
@@ -139,8 +139,7 @@
   (transact-right-after! [{:db/id -1 ::key flat-k}
                           [:db/add [::key parent-flat-k] ::child -1]])
   (let [vchild (volatile! nil)]
-    (reify
-      Component
+    (reify Component
       (ensure! [c ks]
         (or @vchild
           (let [[eid & args] (peek ks)]
@@ -169,7 +168,7 @@
                     qhead
                     (list* 'call vector (conj ks k))
                     (list 'call conj ppath k path))]
-    (reify  Template
+    (reify RuleSet
       #_(additional-schema [t] (additional-schema child))
       (collect-rules [t]
         (list*
@@ -183,30 +182,36 @@
         ()
         {[q ks] {0 {[[] sort-ks] nil}
                  1 (query-tree child)}})
+      (collect-deps [t]
+        (concat deps (collect-deps child)))
+      Template
       (instantiate! [t mount!]
         (for-component child sort-f mount!)))))
 
 (defn fragment-template [body children]
-  (reify Template
+  (reify RuleSet
     #_(additional-schema [t] (into {} (map additional-schema) (map peek children)))
     (collect-rules [t]
       (mapcat (fn [[path child [activation-head :as activation]]]
                 (list* activation
                   (list (list `component-path (second activation-head)) activation-head)
                   (collect-rules child))) children))
+    (collect-deps [t]
+      (mapcat (fn [[_ child]] (collect-deps child)) children))
+    Template
     (instantiate! [t mount!]
       (fragment-component body children mount!))))
 
 (defn terminal-template [rules f]
-  (reify
-    Template
+  (reify RuleSet
     #_(additional-schema [t] {})
     (collect-rules [t] rules)
+    (collect-deps [t] nil)
+    Template
     (instantiate! [t mount!] (terminal-component f mount!))))
 
 (defn state-template [eid args state-entity-f child]
-  #_(reify
-     Template
+  #_(reify Template
      #_(additional-schema [t] {})
      (collect-rules [t]
        {[#_[] (list `ensure-state eid)
@@ -216,12 +221,14 @@
      (instantiate! [t mount! ks]
        (state-component state-entity-f child mount! ks))))
 
-(defn include-template [deps rules]
-  (reify
-    Template
+(defn include-template [template deps rules]
+  (reify RuleSet
     #_(additional-schema [t] {})
     (collect-rules [t] rules)
+    (collect-deps [t] deps)
+    Template
     (instantiate! [t mount!]
+      (instantiate! template mount!)
       #_(instantiate! child mount! ks))))
 
 (declare ^::special for ^::special fragment ^::special terminal)
@@ -267,6 +274,18 @@
               (prn 'DELTA delta))
             (f delta)))))}])
 
+(defn collect-all-rules [ruleset]
+  (loop [rules (set (collect-rules ruleset))
+         done-deps #{}
+         deps (set (collect-deps ruleset))]
+    (if (seq deps)
+      (let [done-deps (into done-deps deps)]
+        (recur
+          (into rules (mapcat #(collect-rules @%)) deps)
+          done-deps
+          (into #{} (comp (mapcat #(collect-deps @%)) (remove done-deps)) deps)))
+      rules)))
+
 (defn mount [template-var elt]
   (let [activation (::activation (meta template-var))
         template @template-var
@@ -286,7 +305,7 @@
                           path (sort-by order paths)]
                     (f root-component path)))
         ; to pass schema or not to pass schema ?
-        rules (collect-rules template)]
+        rules (collect-all-rules template)]
     (d/transact! conn (subscription rules seeds update!))
     (doseq [tx txs] (d/transact! conn tx))
     (r/render [#(first (simplify @dom))] elt)))
@@ -356,20 +375,6 @@
                (if addition
                  (apply send tuple)
                  (apply stop tuple)))))))))
-
-; should move to cljc
-(defn collect-case-ruleset [{::keys [expansion deps] :as rule-value}]
-  (loop [rule-set (set expansion) done #{} todo deps]
-    (if (seq todo)
-      (let [cases (mapcat (fn [dep] (vals @dep)) deps)]
-        (recur
-          (into rule-set (mapcat ::expansion) cases)
-          (into done deps)
-          (remove done (mapcat ::deps cases))))
-      rule-set)))
-
-(defn collect-ruleset [rule]
-  (transduce (map collect-case-ruleset) into #{} (vals rule)))
 
 (comment
   => (def edb

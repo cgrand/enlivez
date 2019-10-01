@@ -5,7 +5,7 @@
   (throw (ex-info (str "TODO: " s) {})))
 
 (def special? '#{or and not fresh let #_new #_if #_when})
-(def special-pred? #{`datom})
+(def special-pred? #{`datom 'eq})
 
 ;; ok the goal here is to implement seminaive evaluation for a datalog program
 
@@ -294,6 +294,37 @@
 
                              :else (assoc bindings ret r))))
                        bindings-seq))
+              eq (let [[a b] args]
+                   (if (symbol? a)
+                     (if (symbol? b)
+                       (keep
+                         (fn [bindings]
+                           (let [av (bindings a bindings)
+                                 bv (bindings a bindings)]
+                             (if (identical? av bindings)
+                               (if (identical? bv bindings)
+                                 (throw (ex-info "Insufficient bindings" {}))
+                                 (assoc bindings a bv))
+                               (if (identical? bv bindings)
+                                 (assoc bindings b av)
+                                 (when (= av bv) bindings)))))
+                         bindings-seq)
+                       (keep
+                         (fn [bindings]
+                           (let [av (bindings a bindings)]
+                             (if (identical? av bindings)
+                               (assoc bindings a b)
+                               (when (= av b) bindings))))
+                         bindings-seq))
+                     (if (symbol? b)
+                       (keep
+                         (fn [bindings]
+                           (let [bv (bindings b bindings)]
+                             (if (identical? bv bindings)
+                               (assoc bindings b a)
+                               (when (= a bv) bindings))))
+                         bindings-seq)
+                       (when (= a b) bindings-seq))))
               (let [rel (case pred
                           enlivez.impl.seminaive/datom (d/datoms (db pred) :eavt) ; brutal
                           (db pred))]

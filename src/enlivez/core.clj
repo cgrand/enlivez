@@ -367,19 +367,32 @@
                                     unnested-call (or (impl/unnest expr) [expr])
                                     clauses (pop unnested-call)
                                     args (next (peek unnested-call))
+                                    vclauses (volatile! clauses)
+                                    args
+                                    (into []
+                                      (map
+                                        (fn [arg callee-arg]
+                                          (if (symbol? arg)
+                                            arg
+                                            (let [arg' (gensym callee-arg)]
+                                              (vswap! vclauses conj (list 'eq arg' arg))
+                                              arg')))
+                                        args (nnext callee-activation)))
+                                    clauses @vclauses
                                     {:keys [deps expansion]}
                                     (analyze-case &env
                                       (first callee-activation)
                                       (cons (second call-site-activation) args)
                                       (cons call-site-activation
                                         clauses)
-                                      #{(first call-site-activation)})]
+                                      #{(first call-site-activation)})
+                                    deps (conj deps (list 'var name))]
                                 ; This is interesting but not fully handled: using nested stuff we can trigger implicit iteration
                                 ; should expressions be allowed as args?
                                 ; only when returning 1 result? or 0?
                                 (reify Template
                                   #_(get-schema [_] (::schema meta))
-                                  (emit-cljs [_] `(include-template ~deps ~expansion))))
+                                  (emit-cljs [_] `(include-template ~name [~@deps] ~expansion))))
                               (seq? expr)
                               (case (first expr)
                                 clojure.core/unquote (terminal env (second expr)) ; cljs escape hatch
