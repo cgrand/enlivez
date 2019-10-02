@@ -101,10 +101,6 @@
       {:expansion all-rules
        :deps @vdeps})))
 
-(defmacro bleh []
-  (let [resolve (resolver &env)]
-    (resolve `datom)))
-
 (defn analyze-q
   "Analyze a query."
   [&env clauses]
