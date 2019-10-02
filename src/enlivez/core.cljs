@@ -66,6 +66,11 @@
   (collect-rules [t] "Returns a collection of rules.")
   (collect-deps [t] "Returns a collection of deps (as vars)."))
 
+(extend-protocol RuleSet
+  default
+  (collect-rules [t] (mapcat ::expansion (vals t)))
+  (collect-deps [t] (mapcat ::deps (vals t))))
+
 (defprotocol Template
   #_(additional-schema [t] "Returns schema declarations that should augment the current db")
   (instantiate! [t mount!]))
@@ -160,7 +165,8 @@
         bound-vars (set bound-vars)
         qhead (cons (gensym "q") rule-vars)
         qrules (map #(cons qhead %) rule-bodies)
-        ks (vec (impl/keyvars rule-bodies (:rschema @conn) bound-vars))
+        ks (vec rule-vars ; TO REFINE
+             #_(impl/keyvars rule-bodies (:rschema @conn) bound-vars))
         k (gensym "k")
         path (second body-activation)
         main-rule (list body-activation

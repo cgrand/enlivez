@@ -505,7 +505,7 @@
                           `(fn [[~@sort-args]] ~sort-expr))]
             `(for-template '~activation '~child-activation
                '~rule-vars ~rule-bodies
-               {:rules ~support-rules :deps ~deps}
+               {:rules ~support-rules :deps [~@(map (fn [x] `(var ~x)) deps)]}
                '~sort-args ~sort-fn
                ~(emit-cljs child))))))))
 
