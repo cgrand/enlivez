@@ -97,7 +97,7 @@
 
 (defn delete-path! [component path]
   (prn '>>>> 'DELETE path)
-  (some-> (ensure-path! component path) delete!))
+  (some-> (reduce ensure! component path) delete!))
 
 (defn- update-top [v f & args]
   (conj (pop v) (apply f (peek v) args)))
@@ -140,21 +140,23 @@
     (ensure! [c args] (ump! (f args)) nil)
     (delete! [c] nil)))
 
-(defn state-component [state-f child ump! [parent-flat-k flat-k]]
-  (transact-right-after! [{:db/id -1 ::key flat-k}
-                          [:db/add [::key parent-flat-k] ::child -1]])
-  (let [vchild (volatile! nil)]
+(defn state-component [state-map child ump!]
+  (let [vk (volatile! nil)
+        vchild (volatile! nil)]
     (reify Component
-      (ensure! [c ks]
+      (ensure! [c state-k]
+        (prn 'SC state-k)
         (or @vchild
-          (let [[eid & args] (peek ks)]
-            (transact-right-after! [(assoc (state-f args) :db/id eid)])
+          (do
+            (transact-right-after! [(assoc state-map ::key state-k)])
+            (vreset! vk state-k)
             (vreset! vchild (instantiate! child ump!)))))
       (delete! [c]
-        (try
-          (delete! @vchild)
-          (finally
-            (d/transact! conn [[:db/retractEntity [::key flat-k]]])))))))
+        (some-> @vchild delete!)
+        (vreset! vchild nil)
+        (when-some [state-k @vk]
+          (transact-right-after! [[:db/retractEntity [::key state-k]]]))
+        (vreset! vk nil)))))
 
 (defn for-template [activation body-activation
                     rule-vars rule-bodies
@@ -216,16 +218,12 @@
     Template
     (instantiate! [t mount!] (terminal-component f mount!))))
 
-(defn state-template [eid args state-entity-f child]
-  #_(reify Template
-     #_(additional-schema [t] {})
-     (collect-rules [t]
-       {[#_[] (list `ensure-state eid)
-         (into [eid] args)] (assoc
-                              (query-tree child)
-                              [[] nil] nil)})
-     (instantiate! [t mount! ks]
-       (state-component state-entity-f child mount! ks))))
+(defn state-template [state-map rules child]
+  (reify RuleSet
+    (collect-rules [t] (concat rules (collect-rules child)))
+    (collect-deps [t] (collect-deps child))
+    Template
+    (instantiate! [t mount!] (state-component state-map child mount!))))
 
 (defn include-template [template-var deps rules]
   (reify RuleSet
@@ -301,7 +299,7 @@
                  (:rschema db)
                  #_(doto (into (:schema db) (additional-schema template))
                     (->> (d/init-db (d/datoms db :eavt)) (d/reset-conn! conn))))
-        {root-eid -1} (:tempids (d/transact! conn [[:db/add -1 ::key []]]))
+        #_#_{root-eid -1} (:tempids (d/transact! conn [[:db/add -1 ::key []]]))
         [root-component txs] (binding [*reentrant* []]
                                [(instantiate! template #(reset! dom %)) *reentrant*])
         update! (fn [delta]

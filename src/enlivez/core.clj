@@ -6,6 +6,8 @@
     [enlivez.q :as q]
     [enlivez.impl.seminaive :as impl]))
 
+(declare for)
+
 (defmacro ^:private DEPRECATED []
   `(throw (ex-info "DEPRECATED" {})))
 
@@ -68,7 +70,7 @@
 
 (defn- quote-clause [[pred & args :as clause]]
   (cond
-    (= 'not pred) `(list 'not ~(quote-clause (first args)))
+    (= 'not pred) `(list '~'not ~(quote-clause (first args)))
     (symbol? pred) `(list '~pred ~@(map (fn [x] (if (symbol? x) (list 'quote x) x)) args))
     (= 'var (first pred)) `(list '~'call ~pred
                              ~@(map (fn [x] (if (symbol? x) (list 'quote x) x)) args))
@@ -303,15 +305,15 @@
   "Returns [expressions hollowed-x] where
    expressions is a sequence of [path expression] and hollowed-x is x where symbols and
    sequences have been replaced by nil."
-  [env x]
+  [env x mode]
   (let [known-vars (:known-vars env)]
     (cond
       (associative? x)
       (reduce-kv (fn [[exprs x] k v]
-                   (let [v (if (and (keyword? k) (.startsWith (name k) "on-"))
+                   (let [v (if (and (= :html mode) (keyword? k) (.startsWith (name k) "on-"))
                              (handler v)
                              v)
-                         [subexprs v] (lift-expressions env v)]
+                         [subexprs v] (lift-expressions env v mode)]
                      [(into exprs
                         (clj/for [[path subexpr] subexprs]
                           [(cons k path) subexpr]))
@@ -322,7 +324,7 @@
             x' (ana/macroexpand-1 host-env' x)]
         (if (= x x')
           [{nil x} nil]
-          (recur env x')))
+          (recur env x' mode)))
      (symbol? x) [{nil x} nil]
      :else [{} x])))
 
@@ -341,7 +343,7 @@
         `(terminal-template [~rule] (fn [[~@args]] ~expr))))))
 
 (defn fragment* [env body options]
-  (let [[exprs body] (lift-expressions env (vec body))
+  (let [[exprs body] (lift-expressions env (vec body) :html)
         &env (:host-env env)
         children (clj/for [[paths expr n] (map-indexed #(conj %2 %1) exprs)
                            :let [pathvar (gensym "path")
@@ -405,39 +407,37 @@
            [~@(clj/for [[path child activation] children]
                 [`'~path (emit-cljs child) (quote-rule activation)])])))))
 
-(defn state-entity-map [env m]
-  (into {}
-    (map (fn [[k v]]
-           (when-not (or (symbol? k) (keyword? k))
-             (throw (ex-info "Invalid state-map, please report." {:m m})))
-           [(if (symbol? k) (keywordize k env) k)
-            (cond
-              (map? v) (state-entity-map env v)
-              (vector? v) (into [] (map #(if (map? %) (state-entity-map env %) %)) v)
-              :else v)]))
-    m))
 
-(defn state-query-map [env m]
-  (into {}
-    (keep (fn [[k v]]
-            (cond
-              (symbol? k)
-              [(keywordize k env) (if (map? v)
-                                    (state-query-map env (assoc v :db/id (symbol (name k))))
-                                    (symbol (name k)))]
-              (keyword? k)
-              (when-some [m (when (map? v)
-                              (let [m (state-query-map env v)]
-                                (when (seq m) m)))]
-                [k m])
-              :else
-              (when-not (or (symbol? k) (keyword? k))
-                (throw (ex-info "Invalid state-map, please report." {:m m}))))))
-    m))
-
-(declare for)
-
-(defn state [env known-vars state-map body options]
+(defn state [env state-map body options]
+  (let [#_#_[exprs state-map] (lift-expressions env state-map :entity-map)
+        state-var (or (:db/id state-map) (gensym "state"))
+        state-map (dissoc state-map :db/id)
+        known-vars' (conj (:known-vars env) state-var)
+        [_ activation-path :as activation] (map #(if (= % state-var) (gensym "_") %) (:activation env)) ; state-var shadowing
+        init-rule `[(component-path path#)  ~activation ((var conj) ~activation-path ~activation-path path#)]
+        state-activation (list* (gensym "state-activation")
+                           (gensym "path")
+                           activation-path ; state key
+                           (disj (:known-vars env) state-var))
+        child-activation (list* (gensym "state-body-activation")
+                           (second state-activation)
+                           known-vars')
+        rules
+        `[[~state-activation ~activation ((var conj) ~activation-path ~activation-path ~(second state-activation))]
+          [(component-path ~(second state-activation)) ~state-activation]
+          [~child-activation ~state-activation
+           (impl/datom ~state-var ::key ~activation-path)]]
+        child (fragment* 
+                (assoc env :known-vars known-vars' :activation child-activation)
+                body options)]
+    (reify Template
+       #_(get-schema [_] (get-schema child))
+       (emit-cljs [_]
+         ; TODO state-map may be expression (at least values)
+         `(state-template ~state-map
+            [~@(map quote-rule rules)]
+            ~(emit-cljs child))))
+    )
   #_(let [state-entity (state-entity-map env state-map)
          state-query (state-query-map env state-map)
          state-query (when (seq state-query) state-query)
@@ -469,8 +469,7 @@
   (when-valid [{:keys [body options]} ::fragment-body body]
     (let [{state-map :state :as options} (into {} (map (juxt :key :value)) options)]
       (if state-map
-        (do (TODO)
-          (state env state-map body (dissoc options :state)))
+        (state env state-map body (dissoc options :state))
         (fragment* env body options)))))
 
 (s/def ::for-body
