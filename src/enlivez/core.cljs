@@ -145,7 +145,6 @@
         vchild (volatile! nil)]
     (reify Component
       (ensure! [c state-k]
-        (prn 'SC state-k)
         (or @vchild
           (do
             (transact-right-after! [(assoc state-map ::key state-k)])
