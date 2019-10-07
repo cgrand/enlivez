@@ -41,7 +41,6 @@
             name
             (list 'var name)))))
     (fn [sym]
-      (prn sym)
       (if (or (and (seq? sym) (= 'var (first sym))) (impl/special? sym) (impl/special-pred? sym)
             (interop? sym))
         sym
@@ -169,6 +168,23 @@
             `(set! ~the-name (assoc ~the-name ~hint ~expr))
             `(alter-var-root (var ~the-name) assoc ~hint ~expr))
          (var ~the-name)))))
+
+(defmacro defhandler
+  "Defines a function suitable to be called in a handler expression.
+   This functions takes a query after the arguments vector (no var-args, no destructuring atm).
+   The body of the function will be evaluated for each match of the query.
+   Arguments are bound in the query.
+   All query vars are bound in the body."
+  [handler-name args rel-expr]
+  (let [qname (symbol (-> *ns* ns-name name) (name handler-name))
+        activation (cons qname args)
+        [q ret] (expand-literal-relational-expression rel-expr)
+        {:keys [deps expansion]} (analyze-case &env qname (conj args ret) q)]
+    `(def ~(vary-meta handler-name assoc ::handler true
+             :arglists `'~(list args) ::rule true)
+       {::defhandler
+        {::expansion ~expansion
+         ::deps [~@(map (fn [x] `(var ~x)) deps)]}})))
 
 ; should move to cljc
 (defn collect-case-ruleset [{::keys [expansion deps] :as rule-value}]
@@ -487,21 +503,6 @@
    `(do ; better trick to make self resolution works? 
       (def ~(vary-meta template-name assoc ::activation activation))
       (set! ~template-name (template ~activation ~args ~@body)))))
-
-(defmacro defhandler
-  "Defines a function suitable to be called in a handler expression.
-   This functions takes a query after the arguments vector (no var-args, no destructuring atm).
-   The body of the function will be evaluated for each match of the query.
-   Arguments are bound in the query.
-   All query vars are bound in the body."
-  [handler-name args rel-expr]
-  (let [qname (symbol (-> *ns* ns-name name) (name handler-name))
-        activation (cons qname args)
-        [q ret] (expand-literal-relational-expression rel-expr)
-        retname (gensym (str name "-tx"))
-        {:keys [deps expansion]} (analyze-case &env retname [ret] (cons activation q))]
-    `(def ~(vary-meta handler-name assoc ::handler true)
-       (handler '~qname '~retname ~expansion [~@(map (fn [x] `(var ~x)) deps)]))))
 
 #_(defmacro io-trigger [q & body]
    (let [q (expand-query &env q)
