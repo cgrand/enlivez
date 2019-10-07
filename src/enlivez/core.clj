@@ -27,10 +27,14 @@
 
 ;; rules
 
+(defn- interop? [sym]
+  (and (simple-symbol? sym) (.startsWith (name sym) ".")))
+
 (defn- resolver [env]
   (if (:ns env)
     (fn [sym]
-      (if (or (and (seq? sym) (= 'var (first sym))) (impl/special? sym) (impl/special-pred? sym))
+      (if (or (and (seq? sym) (= 'var (first sym))) (impl/special? sym) (impl/special-pred? sym)
+            (interop? sym))
         sym
         (let [{:keys [name meta]} (ana/resolve-var env sym (ana/confirm-var-exists-throw))]
           (if (::rule meta)
@@ -38,7 +42,8 @@
             (list 'var name)))))
     (fn [sym]
       (prn sym)
-      (if (or (and (seq? sym) (= 'var (first sym))) (impl/special? sym) (impl/special-pred? sym))
+      (if (or (and (seq? sym) (= 'var (first sym))) (impl/special? sym) (impl/special-pred? sym)
+            (interop? sym))
         sym
         (if-some [v (ns-resolve *ns* env sym)]
           (let [m (meta v)
@@ -73,6 +78,10 @@
 (defn- quote-clause [[pred & args :as clause]]
   (cond
     (= 'not pred) `(list '~'not ~(quote-clause (first args)))
+    (interop? pred)
+    (let [real-args (filter simple-symbol? args)]
+      `(list '~'call (fn [~@(butlast real-args)] (~pred ~@(butlast args)))
+         ~@(map #(list 'quote %) real-args)))
     (symbol? pred) `(list '~pred ~@(map (fn [x] (if (symbol? x) (list 'quote x) x)) args))
     (= 'var (first pred)) `(list '~'call ~pred
                              ~@(map (fn [x] (if (symbol? x) (list 'quote x) x)) args))
@@ -272,7 +281,7 @@
          support-rules :support-rules
          deps :deps} (analyze-q &env q)
         args (filter (:known-vars env) rule-vars)
-        handler-activation (list* (gensym "handler-activation") '% '%this args)
+        handler-activation (list* (gensym "handler-activation") '%event '%this args)
         rules `(concat
                  (clj/for [body# ~rule-bodies]
                    (list* '~rethead '~handler-activation body#))
