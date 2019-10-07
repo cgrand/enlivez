@@ -1,6 +1,7 @@
 (ns enlivez.core
   (:refer-clojure :exclude [for])
   (:require [clojure.core :as clj]
+    [clojure.walk :as w]
     [cljs.analyzer :as ana]
     [clojure.spec.alpha :as s]
     [enlivez.q :as q]
@@ -29,14 +30,15 @@
 (defn- resolver [env]
   (if (:ns env)
     (fn [sym]
-      (if (or (impl/special? sym) (impl/special-pred? sym))
+      (if (or (and (seq? sym) (= 'var (first sym))) (impl/special? sym) (impl/special-pred? sym))
         sym
         (let [{:keys [name meta]} (ana/resolve-var env sym (ana/confirm-var-exists-throw))]
           (if (::rule meta)
             name
             (list 'var name)))))
     (fn [sym]
-      (if (or (impl/special? sym) (impl/special-pred? sym))
+      (prn sym)
+      (if (or (and (seq? sym) (= 'var (first sym))) (impl/special? sym) (impl/special-pred? sym))
         sym
         (if-some [v (ns-resolve *ns* env sym)]
           (let [m (meta v)
@@ -192,9 +194,6 @@
 
 
 ;; hiccup-style template
-(defn- handler [expr]
-  `(~'clojure.core/unquote (txing-handler (fn [~'% ~'%this ~'%db] ~expr))))
-
 (defn used-vars
   "vars must be a predicate"
   [expr known-vars]
@@ -209,6 +208,20 @@
         exprs (pop exprs)]
     [exprs var]))
 
+(defn expand-literal-relational-expression
+  "Returns [query var]"
+  [expr]
+  (let [expr (w/prewalk
+               (fn [e]
+                 (cond
+                   (vector? e) (cons `vector e)
+                   (map? e) (cons `hash-map (mapcat seq e))
+                   (set? e) (cons `hash-set e)
+                   :else e)) expr)]
+    (expand-relational-expression expr)))
+
+(declare handler-call)
+
 (defn lift-expressions
   "Returns [expressions hollowed-x] where
    expressions is a sequence of [path expression] and hollowed-x is x where symbols and
@@ -219,7 +232,7 @@
       (associative? x)
       (reduce-kv (fn [[exprs x] k v]
                    (let [v (if (and (= :html mode) (keyword? k) (.startsWith (name k) "on-"))
-                             (handler v)
+                             (list `handler-call v)
                              v)
                          [subexprs v] (lift-expressions env v mode)]
                      [(into exprs
@@ -233,8 +246,8 @@
         (if (= x x')
           [{nil x} nil]
           (recur env x' mode)))
-     (symbol? x) [{nil x} nil]
-     :else [{} x])))
+      (symbol? x) [{nil x} nil]
+      :else [{} x])))
 
 (defn terminal [env expr]
   (let [args (used-vars expr (:known-vars env)) ; call vec to fix ordering
@@ -249,6 +262,36 @@
       #_(get-schema [_] nil)
       (emit-cljs [_]
         `(terminal-template [~rule] (fn [[~@args]] ~expr))))))
+
+(defn handler-terminal [env rel-expr]
+  (let [&env (:host-env env)
+        [q ret] (expand-literal-relational-expression rel-expr)
+        rethead (list (gensym "tx") ret)
+        {rule-vars :vars
+         rule-bodies :bodies
+         support-rules :support-rules
+         deps :deps} (analyze-q &env q)
+        args (filter (:known-vars env) rule-vars)
+        handler-activation (list* (gensym "handler-activation") '% '%this args)
+        rules `(concat
+                 (clj/for [body# ~rule-bodies]
+                   (list* '~rethead '~handler-activation body#))
+                 ~support-rules)
+        activation (:activation env)
+        activation-path (second activation)
+        rule (quote-rule
+               `((component-path path#) ;-
+                  ~activation
+                  ((var vector) ~@args v#)
+                  ((var conj) ~activation-path v# path#)))]
+    (reify Template
+      #_(get-schema [_] nil)
+      (emit-cljs [_]
+        `(let [handler# (handler '~(first handler-activation) '~(first rethead)
+                          ~rules [~@(map (fn [x] `(var ~x)) deps)])]
+           (terminal-template [~rule]
+             (fn [args#]
+               (handler# args#))))))))
 
 (defn fragment* [env body options]
   (let [[exprs body] (lift-expressions env (vec body) :html)
@@ -302,6 +345,7 @@
                               (seq? expr)
                               (case (first expr)
                                 clojure.core/unquote (terminal env (second expr)) ; cljs escape hatch
+                                enlivez.core/handler-call (handler-terminal env (second expr))
                                 (let [[q var] (expand-relational-expression expr)]
                                   (for env q var)))
                               (symbol? expr)
@@ -435,24 +479,18 @@
    The body of the function will be evaluated for each match of the query.
    Arguments are bound in the query.
    All query vars are bound in the body."
-  [name args q & body]
-  ; TODO: support for desctructuring
-  (let [where (expand-query &env q)
-        vars (vec (used-vars `(do ~@body) (fresh-vars q {})))]
-    `(def ~(vary-meta name assoc ::handler true)
-       (let [q# '~where
-             vars# '~vars
-             pq# (q/prepare-query vars# q# '~args)]
-         (fn ~args
-           (mapcat
-             (fn [~vars]
-               (let [x# (do ~@body)]
-                 (if (or (nil? x#) (sequential? x#)) x# [x#])))
-             (pq# @@#'conn ~@args)))))))
+  [handler-name args rel-expr]
+  (let [qname (symbol (-> *ns* ns-name name) (name handler-name))
+        activation (cons qname args)
+        [q ret] (expand-literal-relational-expression rel-expr)
+        retname (gensym (str name "-tx"))
+        {:keys [deps expansion]} (analyze-case &env retname [ret] (cons activation q))]
+    `(def ~(vary-meta handler-name assoc ::handler true)
+       (handler '~qname '~retname ~expansion [~@(map (fn [x] `(var ~x)) deps)]))))
 
-(defmacro io-trigger [q & body]
-  (let [q (expand-query &env q)
-        vars (vec (used-vars `(do ~@body) (fresh-vars q {})))]
-    `(io-trigger* '~q '~vars
-       (fn ~vars ~@body))))
+#_(defmacro io-trigger [q & body]
+   (let [q (expand-query &env q)
+         vars (vec (used-vars `(do ~@body) (fresh-vars q {})))]
+     `(io-trigger* '~q '~vars
+        (fn ~vars ~@body))))
 

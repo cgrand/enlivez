@@ -289,6 +289,21 @@
           (into #{} (comp (mapcat #(collect-deps @%)) (remove done-deps)) deps)))
       rules)))
 
+(defn handler [qname retname rules deps]
+  (let [rules (collect-all-rules (reify RuleSet
+                                  (collect-rules [t] rules)
+                                  (collect-deps [t] deps)))]
+    (fn [args]
+      (fn [e]
+        (this-as this
+          (let [tx-data (into []
+                          (comp cat cat)
+                          (get (impl/eval-rules
+                                (assoc (impl/make-db @conn) qname
+                                  #{(list* e this args)}) rules)
+                            retname))]
+            (d/transact! conn tx-data)))))))
+
 (defn mount [template-var elt]
   (let [activation (::activation (meta template-var))
         template @template-var
