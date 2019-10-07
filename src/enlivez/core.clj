@@ -355,8 +355,8 @@
                               (case (first expr)
                                 clojure.core/unquote (terminal env (second expr)) ; cljs escape hatch
                                 enlivez.core/handler-call (handler-terminal env (second expr))
-                                (let [[q var] (expand-relational-expression expr)]
-                                  (for env q var)))
+                                (let [v (gensym "expr")]
+                                  (for env [v expr] v)))
                               (symbol? expr)
                               (terminal env expr)
                               :else (throw (ex-info (str "Unexpected expression: " (pr-str expr)) {:expr expr}))))
@@ -438,9 +438,15 @@
     :options (s/* (s/cat :key keyword? :value any?))
     :body (s/* any?)))
 
-(defn for [{&env :host-env :keys [activation known-vars]} q & body]
+(defn for [{&env :host-env :keys [activation known-vars]} pseudo-bindings & body]
   (when-valid [{:keys [body options]} ::fragment-body body]
-    (let [sort-expr (some (fn [{:keys [key value]}]
+    (let [q (map
+              (fn [[lh rh]]
+                (case lh
+                  :when rh
+                  (list 'eq lh rh)))
+              (partition 2 pseudo-bindings))
+          sort-expr (some (fn [{:keys [key value]}]
                            (when (= key :sort) value)) options)
           body (concat
                  (mapcat (fn [{:keys [key value]}]

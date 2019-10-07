@@ -300,7 +300,7 @@
                        (keep
                          (fn [bindings]
                            (let [av (bindings a bindings)
-                                 bv (bindings a bindings)]
+                                 bv (bindings b bindings)]
                              (if (identical? av bindings)
                                (if (identical? bv bindings)
                                  (throw (ex-info "Insufficient bindings" {}))
