@@ -61,8 +61,7 @@
         clause (into [pred]
                  (map (fn [arg]
                         (let [ret (gensym "ret")]
-                          (cond
-                            (seq? arg)
+                          (if (seq? arg)
                             (do
                               (case (first arg)
                                 entity (vswap! vclauses conj
@@ -89,11 +88,7 @@
                                 ; else
                                 (vswap! vclauses conj (explicitize-return arg ret)))
                               ret)
-                            #_#_(map? arg)
-                            (let [id (or (:db/id arg) (gensym "ret-id"))]
-                              (vswap! vclauses conj (flatten-map arg id))
-                              id)
-                            :else arg))))
+                            arg))))
                  args)
         clauses @vclauses]
     (when (seq clauses)
@@ -121,8 +116,6 @@
                 ; it will end bad)
                 (if-some [[[op & args :as clause] & more-clauses] (seq clauses)]
                   (cond
-                    #_#_(map? clause)
-                    (recur aliases done (cons (flatten-map clause) more-clauses))
                     (identical? lift op) ; sentinel for popping aliases
                     (recur (first args) done more-clauses)
                     (keyword? op)
