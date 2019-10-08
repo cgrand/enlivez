@@ -177,13 +177,13 @@
    All query vars are bound in the body."
   [handler-name args rel-expr]
   (let [qname (symbol (-> *ns* ns-name name) (name handler-name))
-        activation (cons qname args)
         [q ret] (expand-literal-relational-expression rel-expr)
         {:keys [deps expansion]} (analyze-case &env qname (conj args ret) q)]
     `(def ~(vary-meta handler-name assoc ::handler true
              :arglists `'~(list args) ::rule true)
        {::defhandler
-        {::expansion ~expansion
+        {::handler '((~qname ~@args) ~rel-expr)
+         ::expansion ~expansion
          ::deps [~@(map (fn [x] `(var ~x)) deps)]}})))
 
 ; should move to cljc

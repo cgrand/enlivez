@@ -304,6 +304,26 @@
                             retname))]
             (d/transact! conn tx-data)))))))
 
+(defn trigger-handler
+  [h & args]
+  (let [[qname & expected-args] (first (::handler (::defhandler h)))
+        rules (collect-all-rules h)
+        call `call#
+        activation `activation#
+        call-rule `((~call ret#) (~activation ~@expected-args) (~qname ~@args ret#))
+        rules (conj rules call-rule)]
+    (when-not (= (count args) (count expected-args))
+    (throw (ex-info (str "Not enough arguments passed to handler, expecting "
+                      (count expected-args) " got " (count args))
+             {:args args
+              :expected-args expected-args})))
+    (into []
+     (comp cat cat)
+     (get (impl/eval-rules
+            (assoc (impl/make-db @conn) activation
+              #{args}) rules)
+       call))))
+
 (defn mount [template-var elt]
   (let [activation (::activation (meta template-var))
         template @template-var
