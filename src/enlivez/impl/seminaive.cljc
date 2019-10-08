@@ -4,7 +4,7 @@
 (defn- TODO [s]
   (throw (ex-info (str "TODO: " s) {})))
 
-(def special? '#{or and not fresh let #_new #_if #_when})
+(def special? '#{entity or and not fresh let #_new #_if #_when})
 (def special-pred? #{`datom 'eq})
 
 ;; ok the goal here is to implement seminaive evaluation for a datalog program
@@ -30,6 +30,30 @@
         expr' (into [] (map (fn [x] ({'% ret} x x))) expr)]
     (cond-> expr' (= expr expr') (conj ret))))
 
+(defn- expand-entity [avs]
+  (let [avs (map (fn [[a v]] [({:db/id 'eq} a a) v]) (partition 2 avs))
+        avs (cond->> avs
+              (not= 'eq (ffirst avs)) (cons (list 'eq (gensym "eid"))) )
+        [[_ e] & avs] avs]
+    (map (fn [[a v]]
+           (if (seq? a)
+             (let [[op & args] a] ; splice
+               (concat (list* op e args) [v]))
+             (list a e v))) avs)))
+
+(defn- explicitize-entity [avs ret]
+  (let [avs (partition 2 avs)
+        avs' (map (fn [[a v]] [({:db/id 'eq} a a) ({'% ret} v v)]) avs)
+        has-ret (not= avs avs')
+        avs (cond->> avs'
+              (not= 'eq (ffirst avs')) (cons (list 'eq (if has-ret (gensym "eid") ret))) )
+        [[_ e] & avs] avs]
+    (cons 'and (map (fn [[a v]]
+                      (if (seq? a)
+                        (let [[op & args] a] ; splice
+                          (concat (list* op e args) [v]))
+                        (list a e v))) avs))))
+
 (defn unnest
   "If clause has nested expressions then unnest them (not recursively) else nil."
   [[pred & args]]
@@ -41,6 +65,8 @@
                             (seq? arg)
                             (do
                               (case (first arg)
+                                entity (vswap! vclauses conj
+                                         (explicitize-entity (next arg) ret))
                                 or (vswap! vclauses conj
                                      (cons 'or
                                        (map #(explicitize-return % ret) (next arg)))) 
@@ -63,7 +89,7 @@
                                 ; else
                                 (vswap! vclauses conj (explicitize-return arg ret)))
                               ret)
-                            (map? arg)
+                            #_#_(map? arg)
                             (let [id (or (:db/id arg) (gensym "ret-id"))]
                               (vswap! vclauses conj (flatten-map arg id))
                               id)
@@ -95,7 +121,7 @@
                 ; it will end bad)
                 (if-some [[[op & args :as clause] & more-clauses] (seq clauses)]
                   (cond
-                    (map? clause)
+                    #_#_(map? clause)
                     (recur aliases done (cons (flatten-map clause) more-clauses))
                     (identical? lift op) ; sentinel for popping aliases
                     (recur (first args) done more-clauses)
@@ -106,6 +132,7 @@
                           clause (cons op args)]
                       (if (special? op)
                         (case op
+                          entity (recur aliases done (concat (expand-entity args) more-clauses))
                           fresh (let [[fresh-vars & scoped-clauses] args
                                       new-aliases (into aliases (for [v fresh-vars] [v (gensym v)]))]
                                   (recur new-aliases done (concat scoped-clauses

@@ -36,12 +36,47 @@
         '#{([rsg x y] [flat x y])
            ([rsg x y] [up x x1] [rsg y1 x1] [down y1 y])}))
   (are [a b] (eq-rules? (impl/lift-all a) b)
+    ; nesting
+    '[((anc x a) (or (parent x a)
+                   (parent (anc x) a)))]
+    '[((anc x a) (parent x a))
+      ((anc x a) (anc x ret49179) (parent ret49179 a))]
+    ; entities
+    '[[(agent eid) (entity :db/id eid :first-name "james" :last-name "bond")]]
+    '(((agent eid) (enlivez.impl.seminaive/datom eid :first-name "james") (enlivez.impl.seminaive/datom eid :last-name "bond")))
+    ; nested entities
+    '[[(bond-car model plate)
+       (entity
+         :car/owner (entity :first-name "james" :last-name "bond")
+         :car/model model
+         :car/plate plate)]]
+    '(((bond-car model plate)
+        (enlivez.impl.seminaive/datom ?bond :first-name "james")
+        (enlivez.impl.seminaive/datom ?bond :last-name "bond")
+        (enlivez.impl.seminaive/datom ?car :car/owner ?bond)
+        (enlivez.impl.seminaive/datom ?car :car/model model)
+        (enlivez.impl.seminaive/datom ?car :car/plate plate)))
+    ; nested-entities + rev attribute (bad query btw)
+    '[[(bond-car model plate)
+       (entity :first-name "james" :last-name "bond"
+         :car/_owner (entity :car/model model
+                       :car/plate plate))]]
+    '(((bond-car model plate)
+       (enlivez.impl.seminaive/datom ?bond :first-name "james")
+       (enlivez.impl.seminaive/datom ?bond :last-name "bond")
+       (enlivez.impl.seminaive/datom ?car :car/model model)
+       (enlivez.impl.seminaive/datom ?car :car/plate plate)
+       (enlivez.impl.seminaive/datom ?car :car/owner ?bond)))
     ; nested ors
-    '[[(x a b c) (f a (or (g b) (h c)))]] '(((x a b c) (g b ret20019) (f a ret20019)) ((x a b c) (h c ret20019) (f a ret20019)))
+    '[[(x a b c) (f a (or (g b) (h c)))]]
+    '(((x a b c) (g b ?0) (f a ?0))
+      ((x a b c) (h c ?0) (f a ?0)))
     ; only the last attribute of a nested and matters (like in Clojure)
-    '[[(x a b c) (f a (and (g b) (h c)))]] '(((x a b c) (g b _20223) (h c ret20216) (f a ret20216)))
+    '[[(x a b c) (f a (and (g b) (h c)))]]
+    '(((x a b c) (g b ?0) (h c ?1) (f a ?1)))
     ; last argument of a nested and can even be a symbol! (you can then put a not before)
-    '[[(x a b c) (f a (and (g b) (h c) (not (bad c)) c))]] ' (((x a b c) (g b _20710) (h c _20711) (not (bad c)) (eq c ret20701) (f a ret20701)))))
+    '[[(x a b c) (f a (and (g b) (h c) (not (bad c)) c))]]
+    '(((x a b c) (g b ?0) (h c ?1) (not (bad c)) (eq c ?2) (f a ?2)))))
 
 (def rsg-edb '{up #{[a e] [a f] [f m] [g n] [h n] [i o] [j o]}
    flat #{[g f] [m n] [m o] [p m]}
