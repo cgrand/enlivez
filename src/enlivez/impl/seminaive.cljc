@@ -4,7 +4,7 @@
 (defn- TODO [s]
   (throw (ex-info (str "TODO: " s) {})))
 
-(def special? '#{entity or and not fresh let #_new #_if #_when})
+(def special? '#{entity or and not let #_new #_if #_when})
 (def special-pred? #{`datom 'eq})
 
 ;; ok the goal here is to implement seminaive evaluation for a datalog program
@@ -102,7 +102,7 @@
     (filter symbol? args)))
 
 (defn lift-all
-  "Expand rules (which may contain nested expressions, ands, ors, nots or freshes) into
+  "Expand rules (which may contain nested expressions, ands, ors, nots) into
    textbook datalog. Supplementary rules mays be created."
   ([rules] (lift-all rules identity))
   ([rules resolve]
@@ -111,36 +111,28 @@
                 (let [head (cons (gensym 'pre-or) (into #{} (mapcat used-vars) clauses))]
                   (swap! new-rules conj (cons head clauses))
                   head))
-              (lift [aliases done clauses]
+              (lift [done clauses]
                 ; MUST returns a seq of vectors (if we have nested laziness 
                 ; it will end bad)
                 (if-some [[[op & args :as clause] & more-clauses] (seq clauses)]
-                  (cond
-                    (identical? lift op) ; sentinel for popping aliases
-                    (recur (first args) done more-clauses)
-                    (keyword? op)
-                    (recur aliases done (cons (expand-kw-clause clause '_) more-clauses))
-                    :else
+                  (if (keyword? op)
+                    (recur done (cons (expand-kw-clause clause '_) more-clauses))
                     (let [op (resolve op)
                           clause (cons op args)]
                       (if (special? op)
                         (case op
-                          entity (recur aliases done (concat (expand-entity args) more-clauses))
-                          fresh (let [[fresh-vars & scoped-clauses] args
-                                      new-aliases (into aliases (for [v fresh-vars] [v (gensym v)]))]
-                                  (recur new-aliases done (concat scoped-clauses
-                                                            (cons (list lift aliases) more-clauses))))
+                          entity (recur done (concat (expand-entity args) more-clauses))
                           or (cond
                                (next args)
                                (let [done (case (count done)
                                             (0 1) done
                                             [(extract-rule! done)])]
-                                 (mapcat #(lift aliases done (cons % more-clauses)) args))
+                                 (mapcat #(lift done (cons % more-clauses)) args))
                                (seq args) ; only 1
-                               (recur aliases done (concat args more-clauses))
+                               (recur done (concat args more-clauses))
                                :else nil)
-                          and (recur aliases done (concat args more-clauses))
-                          not (let [nots (for [clauses (lift aliases [] args)]
+                          and (recur done (concat args more-clauses))
+                          not (let [nots (for [clauses (lift [] args)]
                                            (cond
                                              (next clauses)
                                              (list 'not (extract-rule! clauses))
@@ -150,16 +142,16 @@
                                                  not args)) ; pretty sure there are edge cases
                                              :else ; only 1
                                              (cons 'not clauses)))]
-                                (recur aliases (into done nots) more-clauses)))
+                                (recur (into done nots) more-clauses)))
                         (if-some [clauses (unnest clause)]
-                          (recur aliases done (concat clauses more-clauses))
-                          (recur aliases (conj done (map #(if (= '_ %)
-                                                            (gensym '_)
-                                                            (aliases % %)) clause)) more-clauses)))))
+                          (recur done (concat clauses more-clauses))
+                          (recur (conj done (map #(if (= '_ %)
+                                                    (gensym '_)
+                                                    %) clause)) more-clauses)))))
                   [done]))]
         (concat
           (for [[head & clauses] rules
-                clauses (lift {} [] clauses)]
+                clauses (lift [] clauses)]
             (cons head clauses))
           ; postpone deref until side effects from above are done
           (lazy-seq @new-rules))))))
