@@ -19,14 +19,25 @@
       (for [[k v] (dissoc clause :db/id)]
         (list k id v)))))
 
-(defn expand-kw-clause [[k & args] missing]
+(defn expand-kw-clause
+  [[k & args]]
   (if (.startsWith (name k) "_")
     (let [k (keyword (namespace k) (subs (name k) 1))]
-      (list `datom (nth args 1 missing) k (nth args 0)))
-    (list `datom (nth args 0) k (nth args 1 missing))))
+      (case (count args)
+        2 (list `datom (nth args 1) k (nth args 0))
+        3 (list `datom (nth args 1) k (nth args 0) (nth args 2))))
+    (case (count args)
+      2 (list `datom (nth args 0) k (nth args 1))
+      3 (list `datom (nth args 0) k (nth args 1) (nth args 2)))))
+
+(defn- explicitize-kw [[k & args] ret]
+  (let [args' (map (fn [x] ({'% ret} x x)) args)]
+    (if (= args args')
+      (expand-kw-clause (cons k (concat args' [ret])))
+      (expand-kw-clause (cons k args')))))
 
 (defn- explicitize-return [expr ret]
-  (let [expr (cond-> expr (keyword? (first expr)) (expand-kw-clause '%))
+  (let [expr (cond-> expr (keyword? (first expr)) (explicitize-kw '%))
         expr' (into [] (map (fn [x] ({'% ret} x x))) expr)]
     (cond-> expr' (= expr expr') (conj ret))))
 
@@ -116,7 +127,7 @@
                 ; it will end bad)
                 (if-some [[[op & args :as clause] & more-clauses] (seq clauses)]
                   (if (keyword? op)
-                    (recur done (cons (expand-kw-clause clause '_) more-clauses))
+                    (recur done (cons (expand-kw-clause clause) more-clauses))
                     (let [op (resolve op)
                           clause (cons op args)]
                       (if (special? op)
@@ -362,10 +373,36 @@
                                (when (= a bv) bindings))))
                          bindings-seq)
                        (when (= a b) bindings-seq))))
-              (let [rel (case pred
-                          enlivez.impl.seminaive/datom (d/datoms (db pred) :eavt) ; brutal
-                          (db pred))]
-                (mapcat (fn [bindings] (keep #(match bindings args %) rel)) bindings-seq))))]
+              (case pred
+                enlivez.impl.seminaive/datom ; brutal & assumes attr is known
+                (let [rel (d/datoms (db pred) :aevt (second args))]
+                  (case (count args)
+                    3 (let [[e a v] args]
+                        (mapcat (fn [bindings]
+                                  (keep #(match bindings args %)
+                                    (if (or (not (symbol? e)) (contains? bindings e))
+                                      (d/datoms (db pred) :aevt a (bindings e e))
+                                      (d/datoms (db pred) :aevt a)))) bindings-seq))
+                    4 (let [[e a default v] args
+                            args [e a v]]
+                        (mapcat
+                          (fn [bindings]
+                            (when-not (and (contains? bindings e)
+                                        (or (not (symbol? default)) (contains? bindings default)))
+                              (throw (ex-info "insufficient bindings" {:clause (list pred e a default v)})))
+                            (if-some [datoms (seq (d/datoms (db pred) :aevt a (bindings e e)))]
+                              (seq (keep #(match bindings args %) datoms))
+                              (let [default (bindings default default)]
+                                (if (symbol? v)
+                                  (if (contains? bindings v)
+                                    (when (= (bindings v) default)
+                                      [bindings])
+                                    [(assoc bindings v default)])
+                                  (when (= v default) [bindings])))))
+                          bindings-seq))))
+                (let [rel (db pred)]
+                  (mapcat (fn [bindings]
+                            (keep #(match bindings args %) rel)) bindings-seq)))))]
     (map #(map % head-args) (reduce eval-clause [{}] clauses))))
 
 (defn eval-seminaive-stratum [db {init-rules :init delta-rules :delta}]

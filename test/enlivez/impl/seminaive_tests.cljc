@@ -111,7 +111,17 @@
                    '[([? x' y'] (rsg x y) (:db/ident x x') (:db/ident y y'))
                      ([rsg x y] ;-
                        (or (:flat x y) (rsg (:_down y) (:up x))))])))
-          '#{(:j :f) (:h :f) (:m :n) (:g :f) (:a :d) (:p :m) (:a :b) (:f :k) (:a :c) (:i :f) (:m :o)}))))
+          '#{(:j :f) (:h :f) (:m :n) (:g :f) (:a :d) (:p :m) (:a :b) (:f :k) (:a :c) (:i :f) (:m :o)}))
+    (is (= ('? (impl/eval-rules
+                 (impl/make-db db)
+                 (impl/lift-all
+                   '[([? x' d] (:db/ident x x') (:down x "-" d))])))
+          '#{(:a "-") (:b "-") (:d "-") (:i 14) (:l 4) (:h 12) (:e "-") (:c "-") (:m 4) (:g 16) (:k "-") (:p 13) (:j "-") (:f "-") (:o "-") (:n "-")}))
+    (is (= ('? (impl/eval-rules
+                 (impl/make-db db)
+                 (impl/lift-all
+                   '[([? x'] (:db/ident x x') (:down x "-" "-"))])))
+          '#{(:e) (:b) (:n) (:o) (:c) (:f) (:k) (:a) (:j) (:d)}))))
 
 (deftest fnrel
   (let [r (impl/rel [[1 0]])
