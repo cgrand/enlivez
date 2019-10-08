@@ -1,13 +1,47 @@
 (ns enlivez.impl.seminaive-tests
   #?(:clj
-     (:use [clojure.test :only [deftest is]])
+     (:use [clojure.test :only [deftest is are]])
      :cljs
      (:use-macros [cljs.test :only [deftest is]]))
   (:require
     [enlivez.impl.seminaive :as impl]
-    [enlivez.core :as ez]
-    [datascript.core :as d]
-    #_[enlivez.core :as ez]))
+    [datascript.core :as d]))
+
+(defn eq-rule? "tests whether two expansions are equivalent"
+  [a b]
+  (letfn [(eq? [eqs a b]
+            (cond
+              (and (sequential? a) (sequential? b) (= (count a) (count b)))
+              (reduce (fn [eqs [a b]] (or (eq? eqs a b) (reduced nil)))  eqs (map vector a b))
+              (and (symbol? a) (symbol? b))
+              (cond
+                (eqs a) (when (= (eqs b) a) eqs)
+                (eqs b) nil
+                :else (-> eqs (assoc a b) (assoc b a)))
+              (= a b) eqs))]
+    (eq? {} a b)))
+
+(defn eq-rules? [as bs]
+  (= #{}
+     (reduce
+      (fn [as b]
+        (or (some->> (some #(when (eq-rule? b %) %) as) (disj as))
+            (reduced nil)))
+      (set as) bs)))
+
+(deftest lifting
+  (is (= (set (impl/lift-all
+                '[([rsg x y] (or [flat x y]
+                               (and [up x x1] [rsg y1 x1] [down y1 y])))]))
+        '#{([rsg x y] [flat x y])
+           ([rsg x y] [up x x1] [rsg y1 x1] [down y1 y])}))
+  (are [a b] (eq-rules? (impl/lift-all a) b)
+    ; nested ors
+    '[[(x a b c) (f a (or (g b) (h c)))]] '(((x a b c) (g b ret20019) (f a ret20019)) ((x a b c) (h c ret20019) (f a ret20019)))
+    ; only the last attribute of a nested and matters (like in Clojure)
+    '[[(x a b c) (f a (and (g b) (h c)))]] '(((x a b c) (g b _20223) (h c ret20216) (f a ret20216)))
+    ; last argument of a nested and can even be a symbol! (you can then put a not before)
+    '[[(x a b c) (f a (and (g b) (h c) (not (bad c)) c))]] ' (((x a b c) (g b _20710) (h c _20711) (not (bad c)) (eq c ret20701) (f a ret20701)))))
 
 (def rsg-edb '{up #{[a e] [a f] [f m] [g n] [h n] [i o] [j o]}
    flat #{[g f] [m n] [m o] [p m]}
@@ -19,13 +53,6 @@
                  '[([rsg x y] [flat x y])
                    ([rsg x y] [up x x1] [rsg y1 x1] [down y1 y])]))
         '#{(j f) (h f) (m n) (g f) (a d) (p m) (a b) (f k) (a c) (i f) (m o)})))
-
-(deftest lifting
-  (is (= (set (impl/lift-all
-                '[([rsg x y] (or [flat x y]
-                               (and [up x x1] [rsg y1 x1] [down y1 y])))]))
-        '#{([rsg x y] [flat x y])
-           ([rsg x y] [up x x1] [rsg y1 x1] [down y1 y])})))
 
 (deftest datascript-edb
   (let [db (-> (d/empty-db {:up {:db/valueType :db.type/ref

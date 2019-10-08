@@ -25,24 +25,49 @@
       (list `datom (nth args 1 missing) k (nth args 0)))
     (list `datom (nth args 0) k (nth args 1 missing))))
 
+(defn- explicitize-return [expr ret]
+  (let [expr (cond-> expr (keyword? (first expr)) (expand-kw-clause '%))
+        expr' (into [] (map (fn [x] ({'% ret} x x))) expr)]
+    (cond-> expr' (= expr expr') (conj ret))))
+
 (defn unnest
   "If clause has nested expressions then unnest them (not recursively) else nil."
   [[pred & args]]
   (let [vclauses (volatile! [])
         clause (into [pred]
                  (map (fn [arg]
-                        (cond
-                          (seq? arg)
-                          (let [ret (gensym "ret")
-                                arg (cond-> arg (keyword? (first arg)) (expand-kw-clause '%))
-                                arg' (into [] (map (fn [x] ({'% ret} x x))) arg)]
-                            (vswap! vclauses conj (cond-> arg' (= arg arg') (conj ret)))
-                            ret)
-                          (map? arg)
-                          (let [id (or (:as arg) (gensym "ret-id"))]
-                            (vswap! vclauses conj (flatten-map arg id))
-                            id)
-                          :else arg)))
+                        (let [ret (gensym "ret")]
+                          (cond
+                            (seq? arg)
+                            (do
+                              (case (first arg)
+                                or (vswap! vclauses conj
+                                     (cons 'or
+                                       (map #(explicitize-return % ret) (next arg)))) 
+                                and
+                                (let [last-i (- (count arg) 2)] ; 2 is 1 for the first and 1 for the last
+                                  (vswap! vclauses conj
+                                    (cons 'and
+                                      (map-indexed 
+                                        (fn [i v]
+                                          (cond
+                                            (seq? v)
+                                            (case (first v)
+                                              not v
+                                              (explicitize-return v
+                                                (if (< i last-i) '_ ret)))
+                                            (= i last-i) (list 'eq v ret)
+                                            :else
+                                            (throw (ex-info (str "Unexpected expression intail position of an and: " v)))))
+                                        (next arg)))))
+                                ; else
+                                (vswap! vclauses conj (explicitize-return arg ret)))
+                              ret)
+                            (map? arg)
+                            (let [id (or (:db/id arg) (gensym "ret-id"))]
+                              (vswap! vclauses conj (flatten-map arg id))
+                              id)
+                            :else arg))))
                  args)
         clauses @vclauses]
     (when (seq clauses)
