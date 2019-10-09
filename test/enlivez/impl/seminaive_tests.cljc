@@ -31,10 +31,10 @@
 
 (deftest lifting
   (is (= (set (impl/lift-all
-                '[([rsg x y] (or [flat x y]
-                               (and [up x x1] [rsg y1 x1] [down y1 y])))]))
-        '#{([rsg x y] [flat x y])
-           ([rsg x y] [up x x1] [rsg y1 x1] [down y1 y])}))
+                '[((rsg x y) (or (flat x y)
+                                (and (up x x1) (rsg y1 x1) (down y1 y))))]))
+        '#{((rsg x y) (flat x y))
+           ((rsg x y) (up x x1) (rsg y1 x1) (down y1 y))}))
   (are [a b] (eq-rules? (impl/lift-all a) b)
     ; nesting
     '[((anc x a) (or (parent x a)
@@ -88,8 +88,8 @@
 (deftest rsg
   (is (= ('rsg (impl/eval-rules
                  rsg-edb
-                 '[([rsg x y] [flat x y])
-                   ([rsg x y] [up x x1] [rsg y1 x1] [down y1 y])]))
+                 '[([rsg x y] (flat x y))
+                   ([rsg x y] (up x x1) (rsg y1 x1) (down y1 y))]))
         '#{(j f) (h f) (m n) (g f) (a d) (p m) (a b) (f k) (a c) (i f) (m o)})))
 
 (deftest datascript-edb

@@ -1,7 +1,6 @@
 (ns enlivez.core
   (:refer-clojure :exclude [for])
   (:require [clojure.core :as clj]
-    [clojure.walk :as w]
     [cljs.analyzer :as ana]
     [clojure.spec.alpha :as s]
     [enlivez.q :as q]
@@ -169,6 +168,14 @@
             `(alter-var-root (var ~the-name) assoc ~hint ~expr))
          (var ~the-name)))))
 
+(defn expand-relational-expression
+  "Returns [query var]"
+  [expr]
+  (let [exprs (impl/unnest (list 'dummy expr))
+        [_dummy var] (peek exprs)
+        exprs (pop exprs)]
+    [exprs var]))
+
 (defmacro defhandler
   "Defines a function suitable to be called in a handler expression.
    This functions takes a query after the arguments vector (no var-args, no destructuring atm).
@@ -177,7 +184,7 @@
    All query vars are bound in the body."
   [handler-name args rel-expr]
   (let [qname (symbol (-> *ns* ns-name name) (name handler-name))
-        [q ret] (expand-literal-relational-expression rel-expr)
+        [q ret] (expand-relational-expression rel-expr)
         {:keys [deps expansion]} (analyze-case &env qname (conj args ret) q)]
     `(def ~(vary-meta handler-name assoc ::handler true
              :arglists `'~(list args) ::rule true)
@@ -225,26 +232,6 @@
   ; TODO make it right: it's an overestimate
   (set (filter known-vars (cons expr (tree-seq coll? seq expr)))))
 
-(defn expand-relational-expression
-  "Returns [query var]"
-  [expr]
-  (let [exprs (impl/unnest (list 'dummy expr))
-        [_dummy var] (peek exprs)
-        exprs (pop exprs)]
-    [exprs var]))
-
-(defn expand-literal-relational-expression
-  "Returns [query var]"
-  [expr]
-  (let [expr (w/prewalk
-               (fn [e]
-                 (cond
-                   (vector? e) (cons `vector e)
-                   (map? e) (cons `hash-map (mapcat seq e))
-                   (set? e) (cons `hash-set e)
-                   :else e)) expr)]
-    (expand-relational-expression expr)))
-
 (declare handler-call)
 
 (defn lift-expressions
@@ -290,7 +277,7 @@
 
 (defn handler-terminal [env rel-expr]
   (let [&env (:host-env env)
-        [q ret] (expand-literal-relational-expression rel-expr)
+        [q ret] (expand-relational-expression rel-expr)
         rethead (list (gensym "tx") ret)
         {rule-vars :vars
          rule-bodies :bodies

@@ -24,11 +24,11 @@
   (if (.startsWith (name k) "_")
     (let [k (keyword (namespace k) (subs (name k) 1))]
       (case (count args)
-        ;1 (list `datom '_ k (nth args 0))
+;        1 (list `datom '% k (nth args 0))
         2 (list `datom (nth args 1) k (nth args 0))
         3 (list `datom (nth args 1) k (nth args 0) (nth args 2))))
     (case (count args)
-      ;1 (list `datom (nth args 0) k '_)
+;      1 (list `datom (nth args 0) k '%)
       2 (list `datom (nth args 0) k (nth args 1))
       3 (list `datom (nth args 0) k (nth args 1) (nth args 2)))))
 
@@ -43,7 +43,7 @@
         avs' (map (fn [[a v]] [({:db/id 'eq} a a) ({'% ret} v v)]) avs)
         has-ret (not= avs avs')
         avs (cond->> avs'
-              (not= 'eq (ffirst avs')) (cons (list 'eq (if has-ret (gensym "eid") ret))) )
+              (not= 'eq (ffirst avs')) (cons (list 'eq (if has-ret (gensym "eid") ret))))
         [[_ e] & avs] avs]
     (cons 'and (map (fn [[a v]]
                       (if (seq? a)
@@ -55,57 +55,20 @@
   (case (first expr)
     entity (explicitize-entity (next expr) ret)
     (let [expr (cond-> expr (keyword? (first expr)) (explicitize-kw '%))
-         expr' (into [] (map (fn [x] ({'% ret} x x))) expr)]
-     (cond-> expr' (= expr expr') (conj ret)))))
+         expr' (map (fn [x] ({'% ret} x x)) expr)]
+     (cond-> expr' (= expr expr') (concat [ret])))))
 
 (defn- expand-entity [avs]
   (let [avs (map (fn [[a v]] [({:db/id 'eq} a a) v]) (partition 2 avs))
         avs (cond->> avs
               (not= 'eq (ffirst avs)) (cons (list 'eq (gensym "eid"))) )
         [[_ e] & avs] avs]
-    (map (fn [[a v]]
-           (if (seq? a)
-             (let [[op & args] a] ; splice
-               (concat (list* op e args) [v]))
-             (list a e v))) avs)))
-
-(defn unnest
-  "If clause has nested expressions then unnest them (not recursively) else nil."
-  [[pred & args]]
-  (let [vclauses (volatile! [])
-        clause (into [pred]
-                 (map (fn [arg]
-                        (let [ret (gensym "ret")]
-                          (if (seq? arg)
-                            (do
-                              (case (first arg)
-                                or (vswap! vclauses conj
-                                     (cons 'or
-                                       (map #(explicitize-return % ret) (next arg)))) 
-                                and
-                                (let [last-i (- (count arg) 2)] ; 2 is 1 for the first and 1 for the last
-                                  (vswap! vclauses conj
-                                    (cons 'and
-                                      (map-indexed 
-                                        (fn [i v]
-                                          (cond
-                                            (seq? v)
-                                            (case (first v)
-                                              not v
-                                              (explicitize-return v
-                                                (if (< i last-i) '_ ret)))
-                                            (= i last-i) (list 'eq v ret)
-                                            :else
-                                            (throw (ex-info (str "Unexpected expression intail position of an and: " v)))))
-                                        (next arg)))))
-                                ; else
-                                (vswap! vclauses conj (explicitize-return arg ret)))
-                              ret)
-                            arg))))
-                 args)
-        clauses @vclauses]
-    (when (seq clauses)
-      (conj clauses clause))))
+    (cons 'and
+      (map (fn [[a v]]
+             (if (seq? a)
+               (let [[op & args] a] ; splice
+                 (concat (list* op e args) [v]))
+               (list a e v))) avs))))
 
 (defn used-vars
   "Returns vars used in a canonical (lifted) clause."
@@ -113,6 +76,57 @@
   (case op
     not (recur (first args))
     (filter symbol? args)))
+
+(defn expand-clause [clause]
+  (cond
+    (seq? clause)
+    (let [[op] clause]
+      (cond
+        (keyword? op) (expand-kw-clause clause)
+        (= 'entity op) (expand-entity (next clause))
+        :else clause))
+    (vector? clause) (cons `vector clause)
+    (map? clause) (cons `hash-map (mapcat seq clause))
+    (set? clause) (cons `hash-set clause)
+    :else (throw (ex-info (str "Unexpected clause type: " clause) {:clause clause}))))
+
+(defn unnest
+  "If clause has nested expressions then unnest them (not recursively) else nil."
+  [[pred & args]]
+  (let [vclauses (volatile! [])
+        clause (cons pred
+                 (doall
+                   (map (fn [arg]
+                         (if (coll? arg)
+                           (let [arg (if (seq? arg) arg (expand-clause arg))
+                                 ret (gensym "ret")]
+                             (vswap! vclauses conj
+                               (case (first arg)
+                                 or (cons 'or
+                                      (map #(explicitize-return % ret) (next arg))) 
+                                 and
+                                 (let [last-i (- (count arg) 2)] ; 2 is 1 for the first and 1 for the last
+	                                   (cons 'and
+	                                     (map-indexed 
+	                                       (fn [i v]
+	                                         (cond
+	                                           (seq? v)
+	                                           (case (first v)
+	                                             not v
+	                                             (explicitize-return v
+	                                               (if (< i last-i) '_ ret)))
+	                                           (= i last-i) (list 'eq v ret)
+	                                           :else
+	                                           (throw (ex-info (str "Unexpected expression in tail position of an and: " v) {:v v}))))
+	                                      (next arg))))
+                                 ; else
+                                 (explicitize-return arg ret)))
+                             ret)
+                           arg))
+                     args)))
+        clauses @vclauses]
+    (when (seq clauses)
+      (conj clauses clause))))
 
 (defn lift-all
   "Expand rules (which may contain nested expressions, ands, ors, nots) into
@@ -127,40 +141,38 @@
               (lift [done clauses]
                 ; MUST returns a seq of vectors (if we have nested laziness 
                 ; it will end bad)
-                (if-some [[[op & args :as clause] & more-clauses] (seq clauses)]
-                  (if (keyword? op)
-                    (recur done (cons (expand-kw-clause clause) more-clauses))
-                    (let [op (resolve op)
-                          clause (cons op args)]
-                      (if (special? op)
-                        (case op
-                          entity (recur done (concat (expand-entity args) more-clauses))
-                          or (cond
-                               (next args)
-                               (let [done (case (count done)
-                                            (0 1) done
-                                            [(extract-rule! done)])]
-                                 (mapcat #(lift done (cons % more-clauses)) args))
-                               (seq args) ; only 1
-                               (recur done (concat args more-clauses))
-                               :else nil)
-                          and (recur done (concat args more-clauses))
-                          not (let [nots (for [clauses (lift [] args)]
-                                           (cond
-                                             (next clauses)
-                                             (list 'not (extract-rule! clauses))
-                                             (special? (ffirst clauses))
-                                             (let [[op & args] (first clauses)]
-                                               (case op
-                                                 not args)) ; pretty sure there are edge cases
-                                             :else ; only 1
-                                             (cons 'not clauses)))]
-                                (recur (into done nots) more-clauses)))
-                        (if-some [clauses (unnest clause)]
-                          (recur done (concat clauses more-clauses))
-                          (recur (conj done (map #(if (= '_ %)
-                                                    (gensym '_)
-                                                    %) clause)) more-clauses)))))
+                (if-some [[clause & more-clauses] (seq clauses)]
+                  (let [[op & args] (expand-clause clause)
+                        op (resolve op)
+                        clause (cons op args)]
+                    (if (special? op)
+                      (case op
+                        or (cond
+                             (next args)
+                             (let [done (case (count done)
+                                          (0 1) done
+                                          [(extract-rule! done)])]
+                               (mapcat #(lift done (cons % more-clauses)) args))
+                             (seq args) ; only 1
+                             (recur done (concat args more-clauses))
+                             :else nil)
+                        and (recur done (concat args more-clauses))
+                        not (let [nots (for [clauses (lift [] args)]
+                                         (cond
+                                           (next clauses)
+                                           (list 'not (extract-rule! clauses))
+                                           (special? (ffirst clauses))
+                                           (let [[op & args] (first clauses)]
+                                             (case op
+                                               not args)) ; pretty sure there are edge cases
+                                           :else ; only 1
+                                           (cons 'not clauses)))]
+                              (recur (into done nots) more-clauses)))
+                      (if-some [clauses (unnest clause)]
+                        (recur done (concat clauses more-clauses))
+                        (recur (conj done (map #(if (= '_ %)
+                                                  (gensym '_)
+                                                  %) clause)) more-clauses))))
                   [done]))]
         (concat
           (let [ret (gensym "ret")]
