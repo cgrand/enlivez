@@ -1,5 +1,36 @@
 # Enlive Z
 
+Enlive Z (EZ for short) allows to write relational UIs. Yes, Datalog applied to UIs.
+
+## Why?
+
+We believe that a relational state is superior to a hierarchical state.
+
+We also believe that extracting hierarchical representations from it is counterproductive.
+
+That's why EZ makes it possible to express UIs in a relational language.
+
+## Datalog gets expressive
+
+The theoretical roots of Datalog makes it verbose in practice.
+
+EZ offers an expression-based syntax that internally expands to "regular" Datalog. It's also a departure from Datomic/Datascript-style query language.
+
+In EZ, `(:spouse (:child me))` is equivalent to `[:find ?spouse . :in $ ?me :where [?me :child ?c] [?c :spouse ?spouse]`.
+
+This works because EZ makes the distinction on whether a form appears in *statement* or in *expression* context.
+
+```
+statement = ('not' statement+) | (pred top-expr+)
+top-expr = (pred expr+) | literal | var
+expr = top-expr | '%'
+```
+
+When a form is in expression position (that is it appears nested in arguments position of another one) it gets unnested by appending an extra variable to it and replacing itsef by this very same variable in the parent form. Thus `(:spouse (:child me))` first becomes `(:spouse (:child me) spouse#)` because the whole thing is assumed to be in expression context; then `(:child me)` gets unnested: `(:child me child#) (:spouse child# spouse#)`.
+
+The order of arguments to keywords may look unfamiliar in statement context: `(:attr entity value)` or `(:attr entity default value)`  but it's there to enable the nice clojuresque expression syntax. 
+
+
 ## Handlers
 
 Handlers in EZ templates are not functions but expressions. These expressions must evaluate to transaction data.
