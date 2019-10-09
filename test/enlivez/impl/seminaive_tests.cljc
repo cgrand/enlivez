@@ -44,6 +44,9 @@
     ; entities
     '[[(agent eid) (entity :db/id eid :first-name "james" :last-name "bond")]]
     '(((agent eid) (enlivez.impl.seminaive/datom eid :first-name "james") (enlivez.impl.seminaive/datom eid :last-name "bond")))
+    ; expression bodies
+    '[[(agent %) (entity :first-name "james" :last-name "bond")]]
+    '(((agent ?) (enlivez.impl.seminaive/datom ?e :first-name "james") (enlivez.impl.seminaive/datom ?e :last-name "bond") (eq ?e ?)))
     ; nested entities
     '[[(bond-car model plate)
        (entity

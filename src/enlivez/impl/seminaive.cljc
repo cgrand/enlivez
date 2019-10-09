@@ -24,9 +24,11 @@
   (if (.startsWith (name k) "_")
     (let [k (keyword (namespace k) (subs (name k) 1))]
       (case (count args)
+        ;1 (list `datom '_ k (nth args 0))
         2 (list `datom (nth args 1) k (nth args 0))
         3 (list `datom (nth args 1) k (nth args 0) (nth args 2))))
     (case (count args)
+      ;1 (list `datom (nth args 0) k '_)
       2 (list `datom (nth args 0) k (nth args 1))
       3 (list `datom (nth args 0) k (nth args 1) (nth args 2)))))
 
@@ -35,22 +37,6 @@
     (if (= args args')
       (expand-kw-clause (cons k (concat args' [ret])))
       (expand-kw-clause (cons k args')))))
-
-(defn- explicitize-return [expr ret]
-  (let [expr (cond-> expr (keyword? (first expr)) (explicitize-kw '%))
-        expr' (into [] (map (fn [x] ({'% ret} x x))) expr)]
-    (cond-> expr' (= expr expr') (conj ret))))
-
-(defn- expand-entity [avs]
-  (let [avs (map (fn [[a v]] [({:db/id 'eq} a a) v]) (partition 2 avs))
-        avs (cond->> avs
-              (not= 'eq (ffirst avs)) (cons (list 'eq (gensym "eid"))) )
-        [[_ e] & avs] avs]
-    (map (fn [[a v]]
-           (if (seq? a)
-             (let [[op & args] a] ; splice
-               (concat (list* op e args) [v]))
-             (list a e v))) avs)))
 
 (defn- explicitize-entity [avs ret]
   (let [avs (partition 2 avs)
@@ -65,6 +51,24 @@
                           (concat (list* op e args) [v]))
                         (list a e v))) avs))))
 
+(defn- explicitize-return [expr ret]
+  (case (first expr)
+    entity (explicitize-entity (next expr) ret)
+    (let [expr (cond-> expr (keyword? (first expr)) (explicitize-kw '%))
+         expr' (into [] (map (fn [x] ({'% ret} x x))) expr)]
+     (cond-> expr' (= expr expr') (conj ret)))))
+
+(defn- expand-entity [avs]
+  (let [avs (map (fn [[a v]] [({:db/id 'eq} a a) v]) (partition 2 avs))
+        avs (cond->> avs
+              (not= 'eq (ffirst avs)) (cons (list 'eq (gensym "eid"))) )
+        [[_ e] & avs] avs]
+    (map (fn [[a v]]
+           (if (seq? a)
+             (let [[op & args] a] ; splice
+               (concat (list* op e args) [v]))
+             (list a e v))) avs)))
+
 (defn unnest
   "If clause has nested expressions then unnest them (not recursively) else nil."
   [[pred & args]]
@@ -75,8 +79,6 @@
                           (if (seq? arg)
                             (do
                               (case (first arg)
-                                entity (vswap! vclauses conj
-                                         (explicitize-entity (next arg) ret))
                                 or (vswap! vclauses conj
                                      (cons 'or
                                        (map #(explicitize-return % ret) (next arg)))) 
@@ -161,9 +163,14 @@
                                                     %) clause)) more-clauses)))))
                   [done]))]
         (concat
-          (for [[head & clauses] rules
-                clauses (lift [] clauses)]
-            (cons head clauses))
+          (let [ret (gensym "ret")]
+            (for [[head & clauses] rules
+                  :let [head' (map (fn [x] ({'% ret} x x)) head)
+                        clauses (if (= head head')
+                                  clauses
+                                  [(list 'eq (cons 'and clauses) ret)])]
+                  clauses (lift [] clauses)]
+             (cons head' clauses)))
           ; postpone deref until side effects from above are done
           (lazy-seq @new-rules))))))
 
