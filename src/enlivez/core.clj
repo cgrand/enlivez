@@ -29,13 +29,27 @@
 (defn- interop? [sym]
   (and (simple-symbol? sym) (.startsWith (name sym) ".")))
 
-(defn- resolver [env]
-  (if (:ns env)
+(defn resolve-var
+  "returns a var map"
+  [env sym throw-or-nil]
+  (let [known (volatile! true)
+        v (ana/resolve-var (:host-env env) sym
+            (fn [env prefix suffix]
+              (ana/confirm-var-exists env prefix suffix
+                (case throw-or-nil
+                  :throw (ana/confirm-var-exists-throw)
+                  :nil (fn [env prefix suffix]
+                         (vreset! known false))))))]
+    (when @known v)))
+
+(defn- resolver [&env]
+  (if (:ns &env)
     (fn [sym]
       (if (or (and (seq? sym) (= 'var (first sym))) (impl/special? sym) (impl/special-pred? sym)
             (interop? sym))
         sym
-        (let [{:keys [name meta]} (ana/resolve-var env sym (ana/confirm-var-exists-throw))]
+        (let [env {:host-env &env :known-vars #{}}
+              {:keys [name meta]} (resolve-var env sym :throw)]
           (if (::rule meta)
             name
             (list 'var name)))))
@@ -43,7 +57,7 @@
       (if (or (and (seq? sym) (= 'var (first sym))) (impl/special? sym) (impl/special-pred? sym)
             (interop? sym))
         sym
-        (if-some [v (ns-resolve *ns* env sym)]
+        (if-some [v (ns-resolve *ns* &env sym)]
           (let [m (meta v)
                 name (symbol (-> m :ns ns-name name) (-> m :name name))]
             (if (::rule m)
@@ -76,10 +90,15 @@
 (defn- quote-clause [[pred & args :as clause]]
   (cond
     (= 'not pred) `(list '~'not ~(quote-clause (first args)))
+    (= '. pred)
+    (let [[obj meth & meth-args] args
+          fn-args (filter simple-symbol? (cons obj (butlast meth-args)))]
+      `(list '~'call (fn [~@(butlast fn-args)] (~pred ~@(butlast args)))
+         ~@(map #(list 'quote %) fn-args)))
     (interop? pred)
-    (let [real-args (filter simple-symbol? args)]
-      `(list '~'call (fn [~@(butlast real-args)] (~pred ~@(butlast args)))
-         ~@(map #(list 'quote %) real-args)))
+    (let [fn-args (filter simple-symbol? args)]
+      `(list '~'call (fn [~@(butlast fn-args)] (~pred ~@(butlast args)))
+         ~@(map #(list 'quote %) fn-args)))
     (symbol? pred) `(list '~pred ~@(map (fn [x] (if (symbol? x) (list 'quote x) x)) args))
     (= 'var (first pred)) `(list '~'call ~pred
                              ~@(map (fn [x] (if (symbol? x) (list 'quote x) x)) args))
@@ -169,12 +188,14 @@
          (var ~the-name)))))
 
 (defn expand-relational-expression
-  "Returns [query var]"
+  "Returns (eq query var)"
   [expr]
   (let [exprs (impl/unnest (list 'dummy expr))
         [_dummy var] (peek exprs)
         exprs (pop exprs)]
-    [exprs var]))
+    (list 'eq (if (next exprs)
+                (list 'and exprs)
+                (first exprs)) var)))
 
 (defmacro defhandler
   "Defines a function suitable to be called in a handler expression.
@@ -184,8 +205,8 @@
    All query vars are bound in the body."
   [handler-name args rel-expr]
   (let [qname (symbol (-> *ns* ns-name name) (name handler-name))
-        [q ret] (expand-relational-expression rel-expr)
-        {:keys [deps expansion]} (analyze-case &env qname (conj args ret) q)]
+        [_eq q ret] (expand-relational-expression rel-expr)
+        {:keys [deps expansion]} (analyze-case &env qname (conj args ret) [q])]
     `(def ~(vary-meta handler-name assoc ::handler true
              :arglists `'~(list args) ::rule true)
        {::defhandler
@@ -238,28 +259,22 @@
   "Returns [expressions hollowed-x] where
    expressions is a sequence of [path expression] and hollowed-x is x where symbols and
    sequences have been replaced by nil."
-  [env x mode]
-  (let [known-vars (:known-vars env)]
-    (cond
-      (associative? x)
-      (reduce-kv (fn [[exprs x] k v]
-                   (let [v (if (and (= :html mode) (keyword? k) (.startsWith (name k) "on-"))
-                             (list `handler-call v)
-                             v)
-                         [subexprs v] (lift-expressions env v mode)]
-                     [(into exprs
-                        (clj/for [[path subexpr] subexprs]
-                          [(cons k path) subexpr]))
-                      (assoc x k v)]))
-        [{} x] x)
-      (seq? x)
-      (let [host-env' (update (:host-env env) :locals into (map (fn [sym] [sym {:name sym}])) known-vars)
-            x' (ana/macroexpand-1 host-env' x)]
-        (if (= x x')
-          [{nil x} nil]
-          (recur env x' mode)))
-      (symbol? x) [{nil x} nil]
-      :else [{} x])))
+  [x mode]
+  (cond
+    (associative? x)
+    (reduce-kv (fn [[exprs x] k v]
+                 (let [v (if (and (= :html mode) (keyword? k) (.startsWith (name k) "on-"))
+                           (list `handler-call v)
+                           v)
+                       [subexprs v] (lift-expressions v mode)]
+                   [(into exprs
+                      (clj/for [[path subexpr] subexprs]
+                        [(cons k path) subexpr]))
+                    (assoc x k v)]))
+      [{} x] x)
+    (seq? x) [{nil x} nil]
+    (symbol? x) [{nil x} nil]
+    :else [{} x]))
 
 (defn terminal [env expr]
   (let [args (used-vars expr (:known-vars env)) ; call vec to fix ordering
@@ -277,12 +292,12 @@
 
 (defn handler-terminal [env rel-expr]
   (let [&env (:host-env env)
-        [q ret] (expand-relational-expression rel-expr)
+        [_eq q ret] (expand-relational-expression rel-expr)
         rethead (list (gensym "tx") ret)
         {rule-vars :vars
          rule-bodies :bodies
          support-rules :support-rules
-         deps :deps} (analyze-q &env q)
+         deps :deps} (analyze-q &env [q])
         args (filter (:known-vars env) rule-vars)
         handler-activation (list* (gensym "handler-activation") '%event '%this args)
         rules `(concat
@@ -306,7 +321,7 @@
                (handler# args#))))))))
 
 (defn fragment* [env body options]
-  (let [[exprs body] (lift-expressions env (vec body) :html)
+  (let [[exprs body] (lift-expressions (vec body) :html)
         &env (:host-env env)
         children (clj/for [[paths expr n] (map-indexed #(conj %2 %1) exprs)
                            :let [pathvar (gensym "path")
@@ -317,8 +332,8 @@
                                     ((var conj) ~ppathvar ~n ~pathvar))
                                  env (assoc env :activation (first child-activation))]]
                    [paths (let [{:keys [meta name]}
-                                (when-some [x (and (seq? expr) (first expr))]
-                                  (when (symbol? x) (some->> x (ana/resolve-var &env))))]
+                                (when-some [x (when (seq? expr) (first expr))]
+                                  (when (symbol? x) (resolve-var env x :nil)))]
                             (cond
                               (::special meta)
                               (apply @(resolve name) env (next expr)) ; TODO inclusion
@@ -373,7 +388,7 @@
 
 
 (defn state [env state-map body options]
-  (let [#_#_[exprs state-map] (lift-expressions env state-map :entity-map)
+  (let [#_#_[exprs state-map] (lift-expressions state-map :entity-map)
         state-var (or (:db/id state-map) (gensym "state"))
         state-map (dissoc state-map :db/id)
         known-vars' (conj (:known-vars env) state-var)
