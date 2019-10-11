@@ -346,7 +346,7 @@
         rules (collect-all-rules template)]
     (d/transact! conn (subscription rules seeds update!))
     (doseq [tx txs] (d/transact! conn tx))
-    (r/render [#(first (simplify @dom))] elt)))
+    (r/render [#(into [:<>] (simplify @dom))] elt)))
 
 ;; Sorting
 
