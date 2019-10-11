@@ -1,14 +1,48 @@
 # Enlive Z
 
-Enlive Z (EZ for short) allows to write relational UIs. Yes, Datalog applied to UIs.
+Enlive Z (EZ for short) allows to write relational logic UIs. Yes, Datalog-powered UIs!
 
-## Why?
+Don't run yet! Please have a look at this simple counter:
 
-We believe that a relational state is superior to a hierarchical state.
+```clj
+(require '[enlivez.core :as ez]
 
-We also believe that extracting hierarchical representations from it is counterproductive.
+(ez/deftemplate app []
+  :state {:db/id self
+          :value 42}
+  [:button
+   {:on-click [[:db/add self :value (inc (:value self))]]}
+   "Current value: " (:value self)])
 
-That's why EZ makes it possible to express UIs in a relational language.
+(ez/mount #'app (.-body js/document))
+```
+
+## Rationale
+
+Since Codd's 1970 paper "A Relational Model of Data for Large Shared Data Banks", there's no ambiguity on the superiority of the relational model.
+
+However we suffer from a boundaries between the relational world of the database and the hierarchical/object/graph world of the application.
+
+This boundary is materialized by queries and the amount of code devoted to building hierarchical/object/graph intermediate representations from their result sets.
+
+Modifications impact at least 3 places:
+ * where a piece of data is used,
+ * where it is transformed
+ * where it is sourced.
+ 
+The first two points (building and walking the intermediate representation) are incidental complexity because the shape of the intermediate representation (IR) is determined by the shape of the code.
+
+By writing the UI in a language that translates to relational logic we can avoid having to explicit the IR.
+
+### Bonuses
+
+As a bonus, it is possible to take the derivative of a relational logic program. Thus, long term, it will be possible to only ever compute deltas and directly updates the DOM instead of querying, computing a whole IR, rendering it, diffing a virtual DOM, updating the actual DOM.
+
+Please note that the current state of affairs is already a bit more parsimonious: query, diff result sets, create new vdom by updating the previous one, diff vdoms (which is more efficient because they share
+
+### Wider architecture
+
+All IO should happen as a consequence of updating the DB.
 
 ## Datalog gets expressive
 
@@ -30,6 +64,29 @@ When a form is in expression position (that is it appears nested in arguments po
 
 The order of arguments to keywords may look unfamiliar in statement context: `(:attr entity value)` or `(:attr entity default value)`  but it's there to enable the nice clojuresque expression syntax. 
 
+## Why this Z ?
+
+Z because a Z is a sideways N. Enlive Z achieves the goals that were set for the failed Enlive N.
+
+Because "Enlive" contains the ELVN letters and (Eleven) [http://runeleven.com] sponsors EZ development.
+
+Z like (Zeno) [https://skillsmatter.com/skillscasts/12820-keynote-zeno-and-the-tar-pit].
+
+Z to pay homage to Mazinger Z and Dragon Ball Z. (Thus an Enlive GT or an Enlive Super are not out of question.)
+
+Z like zombie because it's Enlive N raising from the grave (hierarchical model killed EN).
+
+(Add your own.)
+
+## License
+
+Copyright © 2019 FIXME
+
+Distributed under the Eclipse Public License either version 1.0 or (at
+your option) any later version.
+
+
+# HERE BE DRAGONS: OLD DOCUMENTATION
 
 ## Handlers
 
@@ -76,20 +133,3 @@ Map entries whose _values_ are `:or` have defaults maps as keys.
 ```
 
 #### Shorthands
-
-## Why this Z ?
-
-Z because a Z is a sideways N. Enlive Z achieves the goals that were set for the failed Enlive N.
-
-Z like (Zeno) [lien vers Zeno et le tarpit].
-
-Z to pay homage to Mazinger Z and Dragon Ball Z. (So an Enlive GT or an Enlive Super are not out of question.)
-
-Z like zombie because it's Enlive N raising from the grave.
-
-## License
-
-Copyright © 2019 FIXME
-
-Distributed under the Eclipse Public License either version 1.0 or (at
-your option) any later version.
