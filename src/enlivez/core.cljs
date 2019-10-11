@@ -324,10 +324,10 @@
               #{args}) rules)
        call))))
 
-(defn mount [template-var elt]
+(defn mount [template-var elt & args]
   (let [activation (::activation (meta template-var))
         template @template-var
-        seeds {(first activation) #{[[]]}} ; crude seeding assuming root template has no arg
+        seeds {(first activation) #{[(vec args)]}}
         dom (r/atom nil)
         schema (let [db @conn]
                  (:rschema db)
