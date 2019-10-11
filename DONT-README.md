@@ -34,6 +34,8 @@ The first two points (building and walking the intermediate representation) are 
 
 By writing the UI in a language that translates to relational logic we can avoid having to explicit the IR.
 
+By writing UI in EZ we strive for expressiveness.
+
 ### Bonuses
 
 As a bonus, it is possible to take the derivative of a relational logic program. Thus, long term, it will be possible to only ever compute deltas and directly updates the DOM instead of querying, computing a whole IR, rendering it, diffing a virtual DOM, updating the actual DOM.
@@ -68,9 +70,9 @@ The order of arguments to keywords may look unfamiliar in statement context: `(:
 
 Z because a Z is a sideways N. Enlive Z achieves the goals that were set for the failed Enlive N.
 
-Because "Enlive" contains the ELVN letters and (Eleven) [http://runeleven.com] sponsors EZ development.
+Because "Enlive" contains the ELVN letters and [Eleven](http://runeleven.com) sponsors EZ development.
 
-Z like (Zeno) [https://skillsmatter.com/skillscasts/12820-keynote-zeno-and-the-tar-pit].
+Z like [Zeno](https://skillsmatter.com/skillscasts/12820-keynote-zeno-and-the-tar-pit).
 
 Z to pay homage to Mazinger Z and Dragon Ball Z. (Thus an Enlive GT or an Enlive Super are not out of question.)
 
