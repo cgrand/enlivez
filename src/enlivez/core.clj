@@ -65,15 +65,13 @@
               (list 'var name)))
          (throw (ex-info (str "Unable to resolve symbol: " sym) {:sym sym :ns *ns*})))))))
 
-(s/def ::args (s/coll-of simple-symbol? :kind vector?))
-
 (s/def ::defrule
   (s/cat :name simple-symbol? :doc (s/? string?)
-    :args ::args :clauses (s/? (s/+ any?))))
+    :args vector? :clauses (s/* any?)))
 
 (s/def ::defcase
   (s/cat :name symbol? :hint (s/? keyword?)
-    :args ::args :clauses (s/+ any?)))
+    :args vector? :clauses (s/* any?)))
 
 (defmacro defrule
   "Defines an EZ rule with an optional implementation."
@@ -81,7 +79,8 @@
                 [name doc? [args*] clause+])}
   [& body]
   (when-valid [{:keys [doc args clauses] the-name :name} ::defrule body]
-    (let [decl `(def ~(cond-> (vary-meta the-name assoc :arglists `'~(list args) ::rule true)
+    (let [pure-args (into [] (map #(if (symbol? %) % (gensym "_"))) args)
+          decl `(def ~(cond-> (vary-meta the-name assoc :arglists `'~(list pure-args) ::rule true)
                         doc (vary-meta assoc :doc doc)) {})]
       (if clauses
         `(do ~decl (defcase ~the-name ::defrule ~args ~@clauses))
@@ -177,6 +176,17 @@
   (when-valid [{:keys [hint args clauses] the-name :name} ::defcase body]
     (let [hint (or hint (keyword (gensym "case")))
           full-name (symbol (-> *ns* ns-name name) (name the-name))
+          veqs (volatile! [])
+          args (into []
+                 (map #(if (coll? %)
+                         (let [arg (gensym "arg")]
+                           (vswap! veqs conj (list 'eq % arg))
+                           arg)
+                         %))
+                 args)
+          expansion (into @veqs (or (impl/unnest (cons 'vector args)) [(cons 'vector args)]))
+          clauses (into (pop expansion) clauses)
+          args (into [] (next (peek expansion)))
           {:keys [deps expansion]} (analyze-case &env full-name args clauses)
           expr `{::case '~(cons (cons full-name args) clauses)
                  ::expansion ~expansion
