@@ -46,7 +46,15 @@ Please note that the current state of affairs is already a bit more parsimonious
 
 All IO should happen as a consequence of updating the DB.
 
-## Datalog gets expressive
+## templates
+
+## rules
+
+## handlers
+
+## IO triggers
+
+## Datalog gets expressive!
 
 The theoretical roots of Datalog makes it verbose in practice.
 
