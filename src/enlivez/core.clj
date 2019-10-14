@@ -331,70 +331,72 @@
                (handler# args#))))))))
 
 (defn fragment* [env body options]
-  (let [[exprs body] (lift-expressions (vec body) :html)
-        &env (:host-env env)
-        children (clj/for [[paths expr n] (map-indexed #(conj %2 %1) exprs)
-                           :let [pathvar (gensym "path")
-                                 [_ ppathvar & args :as activation] (:activation env)
-                                 child-activation
-                                 `((~(gensym (str "child-" n "_")) ~pathvar ~@args)
-                                    ~activation
-                                    ((var conj) ~ppathvar ~n ~pathvar))
-                                 env (assoc env :activation (first child-activation))]]
-                   [paths (let [{:keys [meta name]}
-                                (when-some [x (when (seq? expr) (first expr))]
-                                  (when (symbol? x) (resolve-var env x :nil)))]
-                            (cond
-                              (::special meta)
-                              (apply @(resolve name) env (next expr)) ; TODO inclusion
-                              (::activation meta)
-                              (let [call-site-activation (:activation env)
-                                    callee-activation (::activation meta)
-                                    unnested-call (or (impl/unnest expr) [expr])
-                                    clauses (pop unnested-call)
-                                    args (next (peek unnested-call))
-                                    vclauses (volatile! clauses)
-                                    args
-                                    (into []
-                                      (map
-                                        (fn [arg callee-arg]
-                                          (if (symbol? arg)
-                                            arg
-                                            (let [arg' (gensym callee-arg)]
-                                              (vswap! vclauses conj (list 'eq arg' arg))
-                                              arg')))
-                                        args (nnext callee-activation)))
-                                    clauses @vclauses
-                                    {:keys [deps expansion]}
-                                    (analyze-case &env
-                                      (first callee-activation)
-                                      (cons (second call-site-activation) args)
-                                      (cons call-site-activation
-                                        clauses)
-                                      #{(first call-site-activation)})
-                                    deps (conj deps (list 'var name))]
-                                ; This is interesting but not fully handled: using nested stuff we can trigger implicit iteration
-                                ; should expressions be allowed as args?
-                                ; only when returning 1 result? or 0?
-                                (reify Template
-                                  #_(get-schema [_] (::schema meta))
-                                  (emit-cljs [_] `(include-template (var ~name) [~@deps] ~expansion))))
-                              (seq? expr)
-                              (case (first expr)
-                                clojure.core/unquote (terminal env (second expr)) ; cljs escape hatch
-                                enlivez.core/handler-call (handler-terminal env (second expr))
-                                (let [v (gensym "expr")]
-                                  (for env [v expr] v)))
-                              (symbol? expr)
-                              (terminal env expr)
-                              :else (throw (ex-info (str "Unexpected expression: " (pr-str expr)) {:expr expr}))))
-                    child-activation])]
-    (reify Template
-      #_(get-schema [_] (transduce (map (comp get-schema second)) (partial merge-with into) (:schema options {}) children))
-      (emit-cljs [_]
-        `(fragment-template ~body
-           [~@(clj/for [[path child activation] children]
-                [`'~path (emit-cljs child) (quote-rule activation)])])))))
+  (if (and (symbol? (first body)) (not (next body)))
+    (terminal env (first body)) ; singleton
+    (let [[exprs body] (lift-expressions (vec body) :html)
+         &env (:host-env env)
+         children (clj/for [[paths expr n] (map-indexed #(conj %2 %1) exprs)
+                            :let [pathvar (gensym "path")
+                                  [_ ppathvar & args :as activation] (:activation env)
+                                  child-activation
+                                  `((~(gensym (str "child-" n "_")) ~pathvar ~@args)
+                                     ~activation
+                                     ((var conj) ~ppathvar ~n ~pathvar))
+                                  env (assoc env :activation (first child-activation))]]
+                    [paths (let [{:keys [meta name]}
+                                 (when-some [x (when (seq? expr) (first expr))]
+                                   (when (symbol? x) (resolve-var env x :nil)))]
+                             (cond
+                               (::special meta)
+                               (apply @(resolve name) env (next expr)) ; TODO inclusion
+                               (::activation meta)
+                               (let [call-site-activation (:activation env)
+                                     callee-activation (::activation meta)
+                                     unnested-call (or (impl/unnest expr) [expr])
+                                     clauses (pop unnested-call)
+                                     args (next (peek unnested-call))
+                                     vclauses (volatile! clauses)
+                                     args
+                                     (into []
+                                       (map
+                                         (fn [arg callee-arg]
+                                           (if (symbol? arg)
+                                             arg
+                                             (let [arg' (gensym callee-arg)]
+                                               (vswap! vclauses conj (list 'eq arg' arg))
+                                               arg')))
+                                         args (nnext callee-activation)))
+                                     clauses @vclauses
+                                     {:keys [deps expansion]}
+                                     (analyze-case &env
+                                       (first callee-activation)
+                                       (cons (second call-site-activation) args)
+                                       (cons call-site-activation
+                                         clauses)
+                                       #{(first call-site-activation)})
+                                     deps (conj deps (list 'var name))]
+                                 ; This is interesting but not fully handled: using nested stuff we can trigger implicit iteration
+                                 ; should expressions be allowed as args?
+                                 ; only when returning 1 result? or 0?
+                                 (reify Template
+                                   #_(get-schema [_] (::schema meta))
+                                   (emit-cljs [_] `(include-template (var ~name) [~@deps] ~expansion))))
+                               (seq? expr)
+                               (case (first expr)
+                                 clojure.core/unquote (terminal env (second expr)) ; cljs escape hatch
+                                 enlivez.core/handler-call (handler-terminal env (second expr))
+                                 (let [v (gensym "expr")]
+                                   (for env [v expr] v)))
+                               (symbol? expr)
+                               (terminal env expr)
+                               :else (throw (ex-info (str "Unexpected expression: " (pr-str expr)) {:expr expr}))))
+                     child-activation])]
+     (reify Template
+       #_(get-schema [_] (transduce (map (comp get-schema second)) (partial merge-with into) (:schema options {}) children))
+       (emit-cljs [_]
+         `(fragment-template ~body
+            [~@(clj/for [[path child activation] children]
+                 [`'~path (emit-cljs child) (quote-rule activation)])]))))))
 
 
 (defn state [env state-map body options]

@@ -239,8 +239,12 @@
 (defn simplify [x]
   (cond
     (map? x) [(into {}
-                (remove (fn [[k v]]
-                          (and (sequential? v) (empty? v))))
+                (keep (fn [[k v :as kv]]
+                        (cond
+                          (not (sequential? v)) kv
+                          (next v) kv ; apply str?
+                          (seq v) [k (first v)]
+                          :else nil)))
                 x)]
     (not (sequential? x)) [x]
     (and (vector? x) (keyword? (first x)))
