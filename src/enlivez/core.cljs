@@ -92,15 +92,29 @@
   (delete! [c] "Deletes this component"))
 
 (defn ensure-path! [component path]
-  (prn '>>>> 'ENSURE path)
   (reduce ensure! component path))
 
 (defn delete-path! [component path]
-  (prn '>>>> 'DELETE path)
   (some-> (reduce ensure! component path) delete!))
 
 (defn- update-top [v f & args]
   (conj (pop v) (apply f (peek v) args)))
+
+(defn expr-component [ump!]
+  (let [children (atom {})
+        doms (atom #{})]
+    (reify Component
+      (ensure! [c v]
+        (or (@children v)
+          (let [child (reify Component
+                        (delete! [c]
+                          (let [doms (swap! doms disj v)]
+                            (swap! children dissoc v)
+                            (ump! (seq doms)))))]
+            (swap! children assoc v child)
+            (ump! (seq (swap! doms conj v)))
+            child)))
+      (delete! [c] nil))))
 
 (defn for-component [child sort-f ump!]
   (let [children (atom {})
@@ -108,18 +122,25 @@
     (reify Component
       (ensure! [c k]
         (or (@children k)
-          (let [child (instantiate! child
-                        #(let [doms (swap! doms assoc k %)]
-                           (ump! (vals doms))))
-                bound-child (reify Component
-                              (ensure! [c k] (ensure! child k))
-                              (delete! [c]
-                                (let [doms (swap! doms dissoc k)]
-                                  (swap! children dissoc k)
-                                  (ump! (vals doms))
-                                  (delete! child))))]
-           (swap! children assoc k bound-child)
-           child)))
+          (let [dom-child (instantiate! child
+                            #(let [doms (swap! doms assoc k %)]
+                               (ump! (vals doms))))
+                #_#_sort-child (reify Component
+                                 (ensure! [c k] (ensure! child k))
+                                 (delete! [c]
+                                   (let [doms (swap! doms dissoc k)]
+                                     (swap! children dissoc k)
+                                     (ump! (vals doms))
+                                     (delete! child))))
+                bichild (reify Component
+                          (ensure! [c k] (case k :dom dom-child))
+                          (delete! [c]
+                            (let [doms (swap! doms dissoc k)]
+                              (swap! children dissoc k)
+                              (ump! (vals doms))
+                              (delete! child))))]
+            (swap! children assoc k bichild)
+            bichild)))
       (delete! [c] nil))))
 
 (defn fragment-component [dom children ump!]
@@ -157,6 +178,38 @@
           (transact-right-after! [[:db/retractEntity [::key state-k]]]))
         (vreset! vk nil)))))
 
+
+(defn expr-template [activation body-activation
+                     rule-vars rule-bodies
+                     {:keys [rules deps]}
+                     retvar]
+  (let [[_ ppath] activation
+        qhead (cons (gensym "q") rule-vars)
+        qrules (map #(cons qhead %) rule-bodies)
+        path (second body-activation)
+        main-rule (list body-activation
+                    activation
+                    qhead
+                    (list 'call conj ppath retvar path))]
+    (reify RuleSet
+      (collect-rules [t]
+        (list*
+          main-rule
+          (list (list `component-path path) body-activation)
+          (concat
+            qrules
+            rules
+            (collect-rules child)))
+        #_#_#_clauses
+        ()
+        {[q ks] {0 {[[] sort-ks] nil}
+                 1 (query-tree child)}})
+      (collect-deps [t]
+        (concat deps (collect-deps child)))
+      Template
+      (instantiate! [t mount!]
+        (expr-component mount!)))))
+
 (defn for-template [activation body-activation
                     rule-vars rule-bodies
                     {:keys [rules deps]}
@@ -174,7 +227,7 @@
                     activation
                     qhead
                     (list* 'call vector (conj ks k))
-                    (list 'call conj ppath k path))]
+                    (list 'call conj ppath k :dom path))]
     (reify RuleSet
       #_(additional-schema [t] (additional-schema child))
       (collect-rules [t]
@@ -295,8 +348,8 @@
 
 (defn handler [qname retname rules deps]
   (let [rules (collect-all-rules (reify RuleSet
-                                  (collect-rules [t] rules)
-                                  (collect-deps [t] deps)))]
+                                   (collect-rules [t] rules)
+                                   (collect-deps [t] deps)))]
     (fn [args]
       (fn [e]
         (this-as this
@@ -309,6 +362,7 @@
             (d/transact! conn tx-data)))))))
 
 (defn trigger-handler
+  "Runs the specified handler and returns its tx-data."
   [h & args]
   (let [[qname & expected-args] (first (::handler (::defhandler h)))
         rules (collect-all-rules h)
