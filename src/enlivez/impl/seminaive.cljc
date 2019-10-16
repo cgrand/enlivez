@@ -51,8 +51,13 @@
                           (concat (list* op e args) [v]))
                         (list a e v))) avs))))
 
-(defn- explicitize-return [expr ret]
-  (case (first expr)
+(defn- explicitize-return [[op & args :as expr] ret]
+  (case op
+    or (cons 'or (map #(explicitize-return % ret) args))
+    and (concat (cons 'and (map #(explicitize-return % (gensym "_")) (butlast args))) [(explicitize-return (last args) ret)])
+    not (list 'and
+          (cons 'not (map #(explicitize-return % (gensym "_")) args))
+          (list 'eq ret true))
     entity (explicitize-entity (next expr) ret)
     (let [expr (cond-> expr (keyword? (first expr)) (explicitize-kw '%))
          expr' (map (fn [x] ({'% ret} x x)) expr)]
@@ -342,7 +347,7 @@
   {`datom datascript-db})
 
 (defn eval-rule [db [[head-pred & head-args] & clauses]]
-  (letfn [(eval-clause [bindings-seq [pred & args]]
+  (letfn [(eval-clause [bindings-seq [pred & args :as clause]]
             (case pred
               not (remove #(seq (eval-clause [%] (first args))) bindings-seq)
               call (let [f (first args)
@@ -370,7 +375,7 @@
                                  bv (bindings b bindings)]
                              (if (identical? av bindings)
                                (if (identical? bv bindings)
-                                 (throw (ex-info "Insufficient bindings" {}))
+                                 (throw (ex-info "Insufficient bindings" {:clause clause}))
                                  (assoc bindings a bv))
                                (if (identical? bv bindings)
                                  (assoc bindings b av)
@@ -466,8 +471,14 @@
 (defn eval-seminaive-strata [db seminaive-strata]
   (reduce eval-seminaive-stratum db seminaive-strata))
 
+(defn prepare-rules [rules]
+  (into [] (map seminaive-stratum) (stratify rules)))
+
+(defn eval-prepared-rules [db prepared-rules]
+  (eval-seminaive-strata db prepared-rules))
+
 (defn eval-rules [db rules]
-  (eval-seminaive-strata db (map seminaive-stratum (stratify rules))))
+  (eval-prepared-rules db (prepare-rules rules)))
 
 (defn binding-profile [bound-vars [pred & args]]
   (if (= 'not pred)

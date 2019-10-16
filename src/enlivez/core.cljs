@@ -24,19 +24,54 @@
             :db/cardinality :db.cardinality/many}
    ::key {:db/unique :db.unique/identity}})
 
-(defn- register-meta-subscriber! [conn]
-  (d/listen! conn ::meta-subscriber
+(defprotocol Component
+  (ensure! [c k] "Returns (creating it if necessary) the child component for k.")
+  (delete! [c] "Deletes this component"))
+
+(defn ensure-path! [component path]
+  (reduce ensure! component path))
+
+(defn delete-path! [component path]
+  (some-> (reduce ensure! component path) delete!))
+
+(def root-component nil)
+
+(defn update-components!
+  [delta]
+  (doseq [path (sort-by (comp - count) (delta false))]
+    (delete-path! root-component path))
+  (doseq [path (sort-by count (delta true))]
+    (ensure-path! root-component path)))
+
+(defn meta-subscriber [conn]
+  (let [cache (atom {:seeds [] :prepared-rules []})
+        aprev-paths (atom #{})]
     (fn [{:keys [tx-data db-after]}]
-      (when-not *reentrant*
-        (let [pending-txs
-              (binding [*reentrant* []]
-                (doseq [[rules seeds f] (d/q '[:find ?rules ?seeds ?f :where [?eid ::rules ?rules] [?eid ::seeds ?seeds] [?eid ::handler ?f]] db-after)]
-                  (let [paths (`component-path
-                                (impl/eval-rules (into (impl/make-db db-after) seeds) rules))]
-                    (f paths)))
-                *reentrant*)]
-          (doseq [tx pending-txs]
-            (d/transact! conn tx)))))))
+      (if (some (fn [[e a]] (#{::rules ::seeds} a)) tx-data)
+        (let [seeds (into #{} (mapcat (fn [[e a v]] v)) (d/datoms db-after :aevt ::seeds))
+              rules (into #{} (mapcat (fn [[e a v]] v)) (d/datoms db-after :aevt ::rules))
+              prepared-rules (impl/prepare-rules rules)]
+          (reset! cache {:seeds seeds :prepared-rules prepared-rules}))
+        (when-not *reentrant*
+          (let [pending-txs
+                (binding [*reentrant* []]
+                  (let [{:keys [seeds prepared-rules]} @cache
+                        paths (`component-path
+                                (impl/eval-prepared-rules (into (impl/make-db db-after) seeds) prepared-rules))
+                        paths (into #{} (map first) paths)
+                        prev-paths @aprev-paths
+                        delta 
+                        {true (into #{} (remove prev-paths) paths)
+                         false (into #{} (remove paths) prev-paths)}]
+                    (prn 'DELTA delta)
+                    (reset! aprev-paths paths)
+                    (update-components! delta))
+                  *reentrant*)]
+            (doseq [tx pending-txs]
+              (d/transact! conn tx))))))))
+
+(defn- register-meta-subscriber! [conn]
+  (d/listen! conn ::meta-subscriber (meta-subscriber conn)))
 
 ;; Datasource is only accessible through subscription
 (def ^:private conn
@@ -74,31 +109,6 @@
 (defprotocol Template
   #_(additional-schema [t] "Returns schema declarations that should augment the current db")
   (instantiate! [t mount!]))
-
-#_(defn- qt-to-rules* [template parent-rule]
-   (let [rulename (gensym 'rule)]
-     (for [[[kve clauses] children] (query-tree template)]
-       )))
-
-#_(defn qt-to-rules [root-template]
-   (let [rulename (gensym 'rule)]
-     (for [[[kve clauses] children] (query-tree template)]
-       ()
-       )))
-
-
-(defprotocol Component
-  (ensure! [c k] "Returns (creating it if necessary) the child component for k.")
-  (delete! [c] "Deletes this component"))
-
-(defn ensure-path! [component path]
-  (reduce ensure! component path))
-
-(defn delete-path! [component path]
-  (some-> (reduce ensure! component path) delete!))
-
-(defn- update-top [v f & args]
-  (conj (pop v) (apply f (peek v) args)))
 
 (defn expr-component [ump!]
   (let [children (atom {})
@@ -289,36 +299,6 @@
     [(into [(first x)] (mapcat simplify (rest x)))]
     :else (mapcat simplify x)))
 
-(def ^:dynamic *print-delta* false)
-
-(defn subscription
-  "Returns transaction data.
-   hq is a hierarchical query, that is a collection of pairs [q k]  where q is
-   a sequence of datascript clauses and k is a collection of variables.
-   A hierarchical query behaves likes the conjuctions of its queries and returns,
-   for each tuple of the result set, a path. Each segment of this path correspond
-   to the instanciation of the k components of hq.
-   f is a functions that receives changes, when the db change, to hq result paths.
-   This changes are represented by a set of vectors, each vector being a path with
-   an additional top item: a boolean, true for addition, false for deletion.
-   Upon transaction of the subscription, f receives a first delta (positive only) representing the current state."
-  [rules seeds f]
-  [{::rules rules
-    ::seeds seeds
-    ::handler
-    (let [aprev-paths (atom #{})]
-      (fn [paths]
-        (let [paths (into #{} (map first) paths)
-              prev-paths @aprev-paths
-              delta 
-              {true (into #{} (remove prev-paths) paths)
-               false (into #{} (remove paths) prev-paths)}]
-          (reset! aprev-paths paths)
-          (when (not= #{} delta)
-            (when *print-delta*
-              (prn 'DELTA delta))
-            (f delta)))))}])
-
 (defn collect-all-rules [ruleset]
   (loop [rules (set (collect-rules ruleset))
          done-deps #{}
@@ -335,14 +315,15 @@
   (let [rules (collect-all-rules (reify RuleSet
                                    (collect-rules [t] rules)
                                    (collect-deps [t] deps)))]
+    ; TODO : prepare rules
     (fn [args]
       (fn [e]
         (this-as this
           (let [tx-data (into []
                           (comp cat cat)
                           (get (impl/eval-rules
-                                (assoc (impl/make-db @conn) qname
-                                  #{(list* e this args)}) rules)
+                                 (assoc (impl/make-db @conn) qname
+                                   #{(list* e this args)}) rules)
                             retname))]
             (d/transact! conn tx-data)))))))
 
@@ -367,6 +348,12 @@
               #{args}) rules)
        call))))
 
+(def trigger-component
+  (reify Component
+    (ensure! [c [f args]]
+      (apply f args))
+    (delete! [c])))
+
 (defn mount [template-var elt & args]
   (let [activation (::activation (meta template-var))
         template @template-var
@@ -379,19 +366,17 @@
         #_#_{root-eid -1} (:tempids (d/transact! conn [[:db/add -1 ::key []]]))
         [component txs] (binding [*reentrant* []]
                           [(instantiate! template #(reset! dom %)) *reentrant*])
-        root-component (reify Component
-                         (ensure! [c k]
-                           (case k :dom component))
-                         (delete! [c]))
-        update! (fn [delta]
-                  (doseq [path (sort-by (comp - count) (delta false))]
-                    (delete-path! root-component path))
-                  (doseq [path (sort-by count (delta true))]
-                    (ensure-path! root-component path)))
         ; to pass schema or not to pass schema ?
         rules (collect-all-rules template)]
-    (d/transact! conn (subscription rules seeds update!))
-    (doseq [tx txs] (d/transact! conn tx))
+    (set! root-component
+      (reify Component
+        (ensure! [c k]
+          (case k
+            :dom component
+            :io trigger-component))
+        (delete! [c])))
+    (d/transact! conn [{::seeds seeds ::rules rules}])
+    (doseq [tx (cons [] txs)] (d/transact! conn tx))
     (r/render [#(into [:<>] (simplify @dom))] elt)))
 
 ;; Sorting
@@ -460,76 +445,4 @@
                  (apply send tuple)
                  (apply stop tuple)))))))))
 
-(comment
-  => (def edb
-       (-> (d/empty-db {})
-         (d/db-with
-           [[:db/add "1" :user/name "Lucy"]
-            [:db/add "2" :user/name "Ethel"]
-            [:db/add "3" :user/name "Fred"]])
-         impl/make-db))
-  => (ez/deftemplate xoxo [] (ez/for [(:user/name _ name)] [:h1 "hello" name]))
-  => (`ez/component-path (impl/eval-rules (assoc edb `xoxo #{[[]]}) (ez/collect-rules xoxo)))
-  #{([0])
-    ([0 [1]])
-    ([0 [1] 0])
-    ([0 [1] 0 ["Lucy"]])
-    ([0 [3]])
-    ([0 [3] 0])
-    ([0 [3] 0 ["Fred"]])
-    ([0 [2]])
-    ([0 [2] 0])
-    ([0 [2] 0 ["Ethel"]])}
-  
-    => (def edb
-       (-> (d/empty-db {:list/tail {:db/valueType :db.type/ref}})
-         (d/db-with
-           [[:db/add "1" :user/name "Lucy"]
-            [:db/add "1" :list/tail "2"]
-            [:db/add "2" :user/name "Ethel"]
-            [:db/add "2" :list/tail "3"]
-            [:db/add "3" :user/name "Fred"]])
-         impl/make-db))
-  => (ez/deftemplate reclist [root]
-       [:h1 root]
-       (ez/for [(:list/tail root tail)]
-         (reclist tail)))
-  => (`ez/component-path (impl/eval-rules (assoc edb `reclist #{[[]]}) (ez/collect-rules reclist)))
-  => (`ez/component-path (impl/eval-rules (assoc edb `reclist #{[[] 1]}) (take 11 rules)))
-#{([0])
-  ([1])
-  ([0 [1]]) ;h1
-  ([1 []])
-  ([1 [] 0])
-  ([1 [] 0 0])
-  ([1 [] 0 1])
-  ([1 [] 0 0 [2]]) ;h1
-  ([1 [] 0 1 []])
-  ([1 [] 0 1 [] 0])
-  ([1 [] 0 1 [] 0 0])
-  ([1 [] 0 1 [] 0 1]) ;h1
-  ([1 [] 0 1 [] 0 0 [3]])}
-  
-  
-  
-  => (ez/deftemplate tree [root]
-       [:dt (ez/for [(:branch/name root name)] name)]
-       [:dd
-        [:dl
-         (ez/for [(:branch/child root branch)]
-           (tree branch))]])
-  
-  => (require '[datascript.core :as d])
-  (require'[enlivez.core :as ez])
-  (require '[enlivez.impl.seminaive :as impl])
-  (def edb
-       (-> (d/empty-db {})
-         (d/db-with
-           [[:db/add "1" :user/name "Lucy"]
-            [:db/add "2" :user/name "Ethel"]
-            [:db/add "3" :user/name "Fred"]])
-         impl/make-db))
-  (ez/deftemplate xoxo [] (ez/for [(:user/name _ name)] [:h1 "hello" name]))
-  (ez/mount #'xoxo (.-body js/document))
-  )
 
