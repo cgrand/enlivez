@@ -336,19 +336,34 @@
                (handler# args#))))))))
 
 (defn terminal-expr [{&env :host-env :keys [activation known-vars]} expr]
-  (let [v (gensym "term-expr")
-        {rule-vars :vars
-         rule-bodies :bodies
-         support-rules :support-rules
-         deps :deps} (analyze-expr &env expr v)
-        expr-activation (list (gensym "expr-activation") (gensym "path"))]
-    (reify Template
-      #_(get-schema [_] (get-schema child))
-      (emit-cljs [_]
-        `(expr-template '~activation '~expr-activation
-           '~rule-vars ~rule-bodies
-           {:rules ~support-rules :deps [~@(map (fn [x] `(var ~x)) deps)]}
-           '~v)))))
+  (if (symbol? expr)
+    (let [v expr
+          expr-activation (list (gensym "expr-activation") (gensym "path"))
+          rules [(quote-rule
+                   (list expr-activation activation
+                     (list '(var conj) (second activation) v (second expr-activation))))
+                 (quote-rule (list (list `component-path (second expr-activation)) expr-activation))]]
+      (reify Template
+        (emit-cljs [_]
+          `(expr-template [~@rules] [] '~v))))
+    (let [v (gensym "term-expr")
+          {rule-vars :vars
+           rule-bodies :bodies
+           support-rules :support-rules
+           deps :deps} (analyze-expr &env expr v)
+          expr-activation (list (gensym "expr-activation") (gensym "path"))
+          qhead (cons (gensym "q") rule-vars)
+          rules (list*
+                  (quote-rule
+                    (list expr-activation activation qhead
+                      (list '(var conj) (second activation) v (second expr-activation))))
+                  (quote-rule (list (list `component-path (second expr-activation)) expr-activation))
+                  (map (fn [body-expr] `(cons '~qhead ~body-expr)) rule-bodies))]
+      (reify Template
+        (emit-cljs [_]
+          `(expr-template
+             [~@rules] [~@(map (fn [x] `(var ~x)) deps)]
+             '~v))))))
 
 (defn fragment* [env body options]
   (let [[exprs body] (lift-expressions (vec body) :html)
@@ -493,8 +508,8 @@
                   :when rh
                   (list 'eq lh rh)))
               (partition 2 pseudo-bindings))
-          sort-expr (some (fn [{:keys [key value]}]
-                           (when (= key :sort) value)) options)
+          sort-expr (or (some (fn [{:keys [key value]}]
+                              (when (= key :sort) value)) options) :no-sort)
           body (concat
                  (mapcat (fn [{:keys [key value]}]
                            (when-not (= key :sort) [key value]))
@@ -505,22 +520,25 @@
            support-rules :support-rules
            deps :deps} (analyze-q &env q)
           known-vars' (into known-vars rule-vars)
-          child-activation (list* (gensym "for-body-activation")
+          child-activation (list* (gensym "for-dom-activation")
                              (gensym "path") known-vars')
           child (apply fragment {:host-env &env
                                  :known-vars known-vars'
-                                 :activation child-activation} body)]
+                                 :activation child-activation} body)
+          sort-activation (list* (gensym "for-sort-activation")
+                            (gensym "path") known-vars')
+          sort-child (terminal-expr {:host-env &env
+                                     :known-vars known-vars'
+                                     :activation sort-activation}
+                       sort-expr)]
       (reify Template
         #_(get-schema [_] (get-schema child))
         (emit-cljs [_]
-          (let [sort-args (when sort-expr (vec (used-vars sort-expr known-vars')))
-                sort-fn (when sort-expr
-                          `(fn [[~@sort-args]] ~sort-expr))]
-            `(for-template '~activation '~child-activation
-               '~rule-vars ~rule-bodies
-               {:rules ~support-rules :deps [~@(map (fn [x] `(var ~x)) deps)]}
-               '~sort-args ~sort-fn
-               ~(emit-cljs child))))))))
+          `(for-template '~activation
+             '~child-activation ~(emit-cljs child)
+             '~sort-activation ~(emit-cljs sort-child)
+             '~rule-vars ~rule-bodies
+             {:rules ~support-rules :deps [~@(map (fn [x] `(var ~x)) deps)]}))))))
 
 (defmacro template [activation args & body]
   (let [env {:host-env &env

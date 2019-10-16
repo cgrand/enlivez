@@ -116,29 +116,34 @@
             child)))
       (delete! [c] nil))))
 
-(defn for-component [child sort-f ump!]
+(defn for-component [child sort-child ump!]
   (let [children (atom {})
-        doms (atom {})]
+        doms (atom {})
+        order (atom (sorted-set))]
     (reify Component
       (ensure! [c k]
         (or (@children k)
           (let [dom-child (instantiate! child
                             #(let [doms (swap! doms assoc k %)]
-                               (ump! (vals doms))))
-                #_#_sort-child (reify Component
-                                 (ensure! [c k] (ensure! child k))
-                                 (delete! [c]
-                                   (let [doms (swap! doms dissoc k)]
-                                     (swap! children dissoc k)
-                                     (ump! (vals doms))
-                                     (delete! child))))
+                               (->> @order (keep (comp doms second)) ump!)))
+                sorter #_(some-> sort-child (instantiate! #(prn 'SORT %)))
+                (reify Component
+                  (ensure! [c sortk]
+                    (->> (swap! order conj [sortk k]) (map second) (keep @doms) ump!)
+                    (reify Component
+                      (delete! [c]
+                        (->> (swap! order disj [sortk k]) (map second) (keep @doms) ump!))))
+                  (delete! [c]))
                 bichild (reify Component
-                          (ensure! [c k] (case k :dom dom-child))
+                          (ensure! [c k]
+                            (case k
+                              :dom dom-child
+                              :sort sorter))
                           (delete! [c]
                             (let [doms (swap! doms dissoc k)]
                               (swap! children dissoc k)
-                              (ump! (vals doms))
-                              (delete! child))))]
+                              (->> @order (keep (comp doms second)) ump!)
+                              (delete! dom-child))))]
             (swap! children assoc k bichild)
             bichild)))
       (delete! [c] nil))))
@@ -179,42 +184,19 @@
         (vreset! vk nil)))))
 
 
-(defn expr-template [activation body-activation
-                     rule-vars rule-bodies
-                     {:keys [rules deps]}
-                     retvar]
-  (let [[_ ppath] activation
-        qhead (cons (gensym "q") rule-vars)
-        qrules (map #(cons qhead %) rule-bodies)
-        path (second body-activation)
-        main-rule (list body-activation
-                    activation
-                    qhead
-                    (list 'call conj ppath retvar path))]
-    (reify RuleSet
-      (collect-rules [t]
-        (list*
-          main-rule
-          (list (list `component-path path) body-activation)
-          (concat
-            qrules
-            rules
-            (collect-rules child)))
-        #_#_#_clauses
-        ()
-        {[q ks] {0 {[[] sort-ks] nil}
-                 1 (query-tree child)}})
-      (collect-deps [t]
-        (concat deps (collect-deps child)))
-      Template
-      (instantiate! [t mount!]
-        (expr-component mount!)))))
+(defn expr-template [rules deps retvar]
+  (reify RuleSet
+    (collect-rules [t] rules)
+    (collect-deps [t] deps)
+    Template
+    (instantiate! [t mount!]
+      (expr-component mount!))))
 
-(defn for-template [activation body-activation
+(defn for-template [activation
+                    body-activation child
+                    sort-activation sort-child
                     rule-vars rule-bodies
-                    {:keys [rules deps]}
-                    sort-ks sort-f
-                    child]
+                    {:keys [rules deps]}]
   (let [[_ ppath & bound-vars] activation
         bound-vars (set bound-vars)
         qhead (cons (gensym "q") rule-vars)
@@ -222,31 +204,34 @@
         ks (vec rule-vars ; TO REFINE
              #_(impl/keyvars rule-bodies (:rschema @conn) bound-vars))
         k (gensym "k")
-        path (second body-activation)
         main-rule (list body-activation
                     activation
                     qhead
                     (list* 'call vector (conj ks k))
-                    (list 'call conj ppath k :dom path))]
+                    (list 'call conj ppath k :dom (second body-activation)))
+        sort-rule (list sort-activation
+                    activation
+                    qhead
+                    (list* 'call vector (conj ks k))
+                    (list 'call conj ppath k :sort (second sort-activation)))]
     (reify RuleSet
       #_(additional-schema [t] (additional-schema child))
       (collect-rules [t]
         (list*
           main-rule
-          (list (list `component-path path) body-activation)
+          sort-rule
+          (list (list `component-path (second body-activation)) body-activation)
+          (list (list `component-path (second sort-activation)) sort-activation)
           (concat
             qrules
             rules
-            (collect-rules child)))
-        #_#_#_clauses
-        ()
-        {[q ks] {0 {[[] sort-ks] nil}
-                 1 (query-tree child)}})
+            (collect-rules child)
+            (collect-rules sort-child))))
       (collect-deps [t]
-        (concat deps (collect-deps child)))
+        (concat deps (collect-deps child) (collect-deps sort-child)))
       Template
       (instantiate! [t mount!]
-        (for-component child sort-f mount!)))))
+        (for-component child sort-child mount!)))))
 
 (defn fragment-template [body children]
   (reify RuleSet
@@ -395,11 +380,10 @@
         [root-component txs] (binding [*reentrant* []]
                                [(instantiate! template #(reset! dom %)) *reentrant*])
         update! (fn [delta]
-                  (doseq [[added paths] delta
-                          :let [f (if added ensure-path! delete-path!)
-                                order (if added count (comp - count))]
-                          path (sort-by order paths)]
-                    (f root-component path)))
+                  (doseq [path (sort-by (comp - count) (delta false))]
+                    (delete-path! root-component path))
+                  (doseq [path (sort-by count (delta true))]
+                    (ensure-path! root-component path)))
         ; to pass schema or not to pass schema ?
         rules (collect-all-rules template)]
     (d/transact! conn (subscription rules seeds update!))
