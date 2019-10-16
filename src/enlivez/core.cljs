@@ -370,15 +370,19 @@
 (defn mount [template-var elt & args]
   (let [activation (::activation (meta template-var))
         template @template-var
-        seeds {(first activation) #{[(vec args)]}}
+        seeds {(first activation) #{[[:dom] (vec args)]}}
         dom (r/atom nil)
         schema (let [db @conn]
                  (:rschema db)
                  #_(doto (into (:schema db) (additional-schema template))
                     (->> (d/init-db (d/datoms db :eavt)) (d/reset-conn! conn))))
         #_#_{root-eid -1} (:tempids (d/transact! conn [[:db/add -1 ::key []]]))
-        [root-component txs] (binding [*reentrant* []]
-                               [(instantiate! template #(reset! dom %)) *reentrant*])
+        [component txs] (binding [*reentrant* []]
+                          [(instantiate! template #(reset! dom %)) *reentrant*])
+        root-component (reify Component
+                         (ensure! [c k]
+                           (case k :dom component))
+                         (delete! [c]))
         update! (fn [delta]
                   (doseq [path (sort-by (comp - count) (delta false))]
                     (delete-path! root-component path))
