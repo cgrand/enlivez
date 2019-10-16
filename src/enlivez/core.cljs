@@ -47,28 +47,28 @@
   (let [cache (atom {:seeds [] :prepared-rules []})
         aprev-paths (atom #{})]
     (fn [{:keys [tx-data db-after]}]
-      (if (some (fn [[e a]] (#{::rules ::seeds} a)) tx-data)
+      (when (some (fn [[e a]] (#{::rules ::seeds} a)) tx-data)
         (let [seeds (into #{} (mapcat (fn [[e a v]] v)) (d/datoms db-after :aevt ::seeds))
               rules (into #{} (mapcat (fn [[e a v]] v)) (d/datoms db-after :aevt ::rules))
               prepared-rules (impl/prepare-rules rules)]
-          (reset! cache {:seeds seeds :prepared-rules prepared-rules}))
-        (when-not *reentrant*
-          (let [pending-txs
-                (binding [*reentrant* []]
-                  (let [{:keys [seeds prepared-rules]} @cache
-                        paths (`component-path
-                                (impl/eval-prepared-rules (into (impl/make-db db-after) seeds) prepared-rules))
-                        paths (into #{} (map first) paths)
-                        prev-paths @aprev-paths
-                        delta 
-                        {true (into #{} (remove prev-paths) paths)
-                         false (into #{} (remove paths) prev-paths)}]
-                    (prn 'DELTA delta)
-                    (reset! aprev-paths paths)
-                    (update-components! delta))
-                  *reentrant*)]
-            (doseq [tx pending-txs]
-              (d/transact! conn tx))))))))
+          (reset! cache {:seeds seeds :prepared-rules prepared-rules})))
+      (when-not *reentrant*
+        (let [pending-txs
+              (binding [*reentrant* []]
+                (let [{:keys [seeds prepared-rules]} @cache
+                      paths (`component-path
+                              (impl/eval-prepared-rules (into (impl/make-db db-after) seeds) prepared-rules))
+                      paths (into #{} (map first) paths)
+                      prev-paths @aprev-paths
+                      delta 
+                      {true (into #{} (remove prev-paths) paths)
+                       false (into #{} (remove paths) prev-paths)}]
+                  (prn 'DELTA delta)
+                  (reset! aprev-paths paths)
+                  (update-components! delta))
+                *reentrant*)]
+          (doseq [tx pending-txs]
+            (d/transact! conn tx)))))))
 
 (defn- register-meta-subscriber! [conn]
   (d/listen! conn ::meta-subscriber (meta-subscriber conn)))
@@ -376,7 +376,7 @@
             :io trigger-component))
         (delete! [c])))
     (d/transact! conn [{::seeds seeds ::rules rules}])
-    (doseq [tx (cons [] txs)] (d/transact! conn tx))
+    (doseq [tx txs] (d/transact! conn tx))
     (r/render [#(into [:<>] (simplify @dom))] elt)))
 
 ;; Sorting
