@@ -289,17 +289,17 @@
     [(into [(first x)] (mapcat simplify (rest x)))]
     :else (mapcat simplify x)))
 
-(defn collect-all-rules [ruleset]
-  (loop [rules (set (collect-rules ruleset))
-         done-deps #{}
-         deps (set (collect-deps ruleset))]
-    (if (seq deps)
-      (let [done-deps (into done-deps deps)]
-        (recur
-          (into rules (mapcat #(collect-rules @%)) deps)
-          done-deps
-          (into #{} (comp (mapcat #(collect-deps @%)) (remove done-deps)) deps)))
-      rules)))
+(defn collect-all-rules 
+  ([ruleset] (collect-all-rules (collect-rules ruleset) (collect-deps ruleset)))
+  ([rules deps]
+    (loop [rules (set rules) done-deps #{} deps (set deps)]
+      (if (seq deps)
+        (let [done-deps (into done-deps deps)]
+          (recur
+            (into rules (mapcat #(collect-rules @%)) deps)
+            done-deps
+            (into #{} (comp (mapcat #(collect-deps @%)) (remove done-deps)) deps)))
+        rules))))
 
 (defn handler [qname retname rules deps]
   (let [rules (collect-all-rules (reify RuleSet
@@ -340,7 +340,7 @@
 
 (def trigger-component
   (reify Component
-    (ensure! [c [f args]]
+    (ensure! [c [f & args]]
       (apply f args))
     (delete! [c])))
 
@@ -363,9 +363,9 @@
         (ensure! [c k]
           (case k
             :dom component
-            :io trigger-component))
+            :trigger trigger-component))
         (delete! [c])))
-    (d/transact! conn [{::seeds seeds ::rules rules}])
+    (d/transact! conn [{::seeds seeds ::rules rules :db/ident :root}])
     (doseq [tx txs] (d/transact! conn tx))
     (r/render [#(into [:<>] (simplify @dom))] elt)))
 
@@ -421,18 +421,8 @@
   (into [] (map #(% x)) sort-ks))
 
 ;; IO
-(defn io-trigger*
-  ([q binding send]
-    (io-trigger* q binding send (constantly nil)))
-  ([q binding send stop]
-    (let [tx! #(d/transact! conn %)]
-      (throw (ex-info "TODO" {}))
-#_      (tx!
-         (subscription [[q binding] [[] []]]
-           (fn [delta]
-             (doseq [[tuple _ addition] delta]
-               (if addition
-                 (apply send tuple)
-                 (apply stop tuple)))))))))
+(defn io-trigger* [ident rules deps]
+  (d/transact! conn
+    [{::rules (collect-all-rules rules deps) :db/ident ident}]))
 
 

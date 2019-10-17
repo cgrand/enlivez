@@ -560,9 +560,19 @@
       (def ~(vary-meta template-name assoc ::activation activation))
       (set! ~template-name (template ~activation ~args ~@body)))))
 
-#_(defmacro io-trigger [q & body]
-   (let [q (expand-query &env q)
-         vars (vec (used-vars `(do ~@body) (fresh-vars q {})))]
-     `(io-trigger* '~q '~vars
-        (fn ~vars ~@body))))
+(defmacro deftrigger
+  "Register side-effecting code (IO) to run for each query match."
+  [trigger-name q & body]
+  (let [qname (symbol (-> *ns* ns-name name) (name trigger-name))
+        {:keys [vars bodies support-rules deps]} (analyze-q &env q)
+        qhead (cons qname vars)
+        rules (concat
+                [(quote-rule
+                  `[(component-path path#) ~qhead
+                    ((var vector) (fn [~@(next qhead)] ~@body) ~@(next qhead) comp#)
+                    ((var vector) :trigger comp# path#)])]
+                (clj/for [body bodies]
+                  `(cons '~qhead ~body))
+                support-rules)]
+    `(io-trigger* ~(keyword qname) [~@rules] [~@(map (fn [x] `(var ~x)) deps)])))
 
