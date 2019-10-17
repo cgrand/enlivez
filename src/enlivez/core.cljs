@@ -26,13 +26,13 @@
 
 (defprotocol Component
   (ensure! [c k] "Returns (creating it if necessary) the child component for k.")
-  (delete! [c] "Deletes this component"))
+  (delete! [c k] "Deletes child component."))
 
 (defn ensure-path! [component path]
   (reduce ensure! component path))
 
 (defn delete-path! [component path]
-  (some-> (reduce ensure! component path) delete!))
+  (some-> (reduce ensure! component (pop path)) (delete! (peek path))))
 
 (def root-component nil)
 
@@ -77,16 +77,6 @@
 (def ^:private conn
   (doto (d/create-conn core-schema) register-meta-subscriber!))
 
-#_(defn hijack-conn! [existing-conn]
-   (.log js/console "NOPE43")
-   (let [existing-db @existing-conn]
-     (doto (into (:schema existing-db) core-schema)
-       (->>
-         (d/init-db (d/datoms existing-db :eavt))
-         (d/reset-conn! existing-conn)))
-     (register-meta-subscriber! existing-conn))
-   (set! conn existing-conn))
-
 (defprotocol RuleSet
   (collect-rules [t] "Returns a collection of rules.")
   (collect-deps [t] "Returns a collection of deps (as vars)."))
@@ -101,20 +91,13 @@
   (instantiate! [t mount!]))
 
 (defn expr-component [ump!]
-  (let [children (atom {})
-        doms (atom #{})]
+  (let [doms (atom #{})]
     (reify Component
       (ensure! [c v]
-        (or (@children v)
-          (let [child (reify Component
-                        (delete! [c]
-                          (let [doms (swap! doms disj v)]
-                            (swap! children dissoc v)
-                            (ump! (seq doms)))))]
-            (swap! children assoc v child)
-            (ump! (seq (swap! doms conj v)))
-            child)))
-      (delete! [c] nil))))
+        (ump! (seq (swap! doms conj v)))
+        nil)
+      (delete! [c v]
+        (ump! (seq (swap! doms disj v)))))))
 
 (defn for-component [child sort-child ump!]
   (let [children (atom {})
@@ -126,27 +109,25 @@
           (let [dom-child (instantiate! child
                             #(let [doms (swap! doms assoc k %)]
                                (->> @order (keep (comp doms second)) ump!)))
-                sorter #_(some-> sort-child (instantiate! #(prn 'SORT %)))
+                sorter
                 (reify Component
                   (ensure! [c sortk]
                     (->> (swap! order conj [sortk k]) (map second) (keep @doms) ump!)
-                    (reify Component
-                      (delete! [c]
-                        (->> (swap! order disj [sortk k]) (map second) (keep @doms) ump!))))
-                  (delete! [c]))
+                    nil)
+                  (delete! [c sortk]
+                    (->> (swap! order disj [sortk k]) (map second) (keep @doms) ump!)))
                 bichild (reify Component
-                          (ensure! [c k]
-                            (case k
+                          (ensure! [c dom-or-sort]
+                            (case dom-or-sort
                               :dom dom-child
                               :sort sorter))
-                          (delete! [c]
-                            (let [doms (swap! doms dissoc k)]
-                              (swap! children dissoc k)
-                              (->> @order (keep (comp doms second)) ump!)
-                              (delete! dom-child))))]
+                          (delete! [c _]))]
             (swap! children assoc k bichild)
             bichild)))
-      (delete! [c] nil))))
+      (delete! [c k]
+        (let [doms (swap! doms dissoc k)]
+          (swap! children dissoc k)
+          (->> @order (keep (comp doms second)) ump!))))))
 
 (defn fragment-component [dom children ump!]
   (let [adom (atom dom)
@@ -159,29 +140,24 @@
     (ump! dom)
     (reify Component
       (ensure! [c i] (nth children i))
-      (delete! [c] nil))))
+      (delete! [c i] nil))))
 
 (defn terminal-component [f ump!]
   (reify Component
     (ensure! [c args] (ump! (f args)) nil)
-    (delete! [c] nil)))
+    (delete! [c args] nil)))
 
 (defn state-component [state-map child ump!]
-  (let [vk (volatile! nil)
-        vchild (volatile! nil)]
+  (let [vchild (volatile! nil)] ; decouple transacted boolean & child
     (reify Component
       (ensure! [c state-k]
         (or @vchild
           (do
             (transact-right-after! [(assoc state-map ::key state-k)])
-            (vreset! vk state-k)
             (vreset! vchild (instantiate! child ump!)))))
-      (delete! [c]
-        (some-> @vchild delete!)
+      (delete! [c state-k]
         (vreset! vchild nil)
-        (when-some [state-k @vk]
-          (transact-right-after! [[:db/retractEntity [::key state-k]]]))
-        (vreset! vk nil)))))
+        (transact-right-after! [[:db/retractEntity [::key state-k]]])))))
 
 
 (defn expr-template [rules deps retvar]
@@ -317,7 +293,7 @@
                             retname))]
             (d/transact! conn tx-data)))))))
 
-(defn trigger-handler
+(defn dryrun-handler
   "Runs the specified handler and returns its tx-data."
   [h & args]
   (let [[qname & expected-args] (first (::handler (::defhandler h)))
@@ -340,9 +316,10 @@
 
 (def trigger-component
   (reify Component
-    (ensure! [c [f & args]]
-      (apply f args))
-    (delete! [c])))
+    (ensure! [c [start stop & args]]
+      (apply start args))
+    (delete! [c [start stop & args]]
+      (apply stop args))))
 
 (defn mount [template-var elt & args]
   (let [activation (::activation (meta template-var))
@@ -364,7 +341,7 @@
           (case k
             :dom component
             :trigger trigger-component))
-        (delete! [c])))
+        (delete! [c k])))
     (d/transact! conn [{::seeds seeds ::rules rules :db/ident :root}])
     (doseq [tx txs] (d/transact! conn tx))
     (r/render [#(into [:<>] (simplify @dom))] elt)))

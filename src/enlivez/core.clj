@@ -466,29 +466,7 @@
          ; TODO state-map may be expression (at least values)
          `(state-template ~state-map
             [~@(map quote-rule rules)]
-            ~(emit-cljs child))))
-    )
-  #_(let [state-entity (state-entity-map env state-map)
-         state-query (state-query-map env state-map)
-         state-query (when (seq state-query) state-query)
-         eid (:db/id state-entity '_)
-         eid (if (and state-query (= '_ eid))
-               'state-eid
-               eid)
-         known-vars (case eid
-                      _ known-vars
-                      (assoc known-vars eid (gensym eid)))
-         state-query (some-> state-query (assoc :db/id eid))
-         state-entity (dissoc state-entity :db/id)
-         args (vec (used-vars state-entity known-vars))
-         child (if state-query
-                 (apply for env known-vars state-query body)
-                 (fragment* env known-vars body options))]
-     (reify Template
-       #_(get-schema [_] (get-schema child))
-       (emit-cljs [_]
-         ; TODO state-map may be expression (at least values)
-         `(state-template '~(known-vars eid '_) '~(mapv known-vars args) (fn [~args] ~state-entity) ~(emit-cljs child))))))
+            ~(emit-cljs child))))))
 
 (s/def ::fragment-body
   (s/cat
@@ -563,13 +541,19 @@
 (defmacro deftrigger
   "Register side-effecting code (IO) to run for each query match."
   [trigger-name q & body]
-  (let [qname (symbol (-> *ns* ns-name name) (name trigger-name))
+  (let [{:keys [start stop]} (case (first body)
+                               (:start :stop) (apply hash-map body)
+                               {:start (cons 'do body)})
+        qname (symbol (-> *ns* ns-name name) (name trigger-name))
         {:keys [vars bodies support-rules deps]} (analyze-q &env q)
         qhead (cons qname vars)
         rules (concat
                 [(quote-rule
                   `[(component-path path#) ~qhead
-                    ((var vector) (fn [~@(next qhead)] ~@body) ~@(next qhead) comp#)
+                    ((var vector)
+                      (fn [~@(next qhead)] ~start)
+                      (fn [~@(next qhead)] ~stop)
+                      ~@(next qhead) comp#)
                     ((var vector) :trigger comp# path#)])]
                 (clj/for [body bodies]
                   `(cons '~qhead ~body))
