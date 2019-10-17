@@ -77,25 +77,15 @@
 (def ^:private conn
   (doto (d/create-conn core-schema) register-meta-subscriber!))
 
-(defn hijack-conn! [existing-conn]
-  (.log js/console "NOPE43")
-  (let [existing-db @existing-conn]
-    (doto (into (:schema existing-db) core-schema)
-      (->>
-        (d/init-db (d/datoms existing-db :eavt))
-        (d/reset-conn! existing-conn)))
-    (register-meta-subscriber! existing-conn))
-  (set! conn existing-conn))
-
-(defn call-with-db [db f this e]
-  (let [tx (.call f this e db)]
-    (if (map? tx) [tx] tx)))
-
-(defn txing-handler [f]
-  (fn [e]
-    (this-as this
-      (when-some [tx (f e this @conn)]
-        (d/transact! conn (if (map? tx) [tx] tx))))))
+#_(defn hijack-conn! [existing-conn]
+   (.log js/console "NOPE43")
+   (let [existing-db @existing-conn]
+     (doto (into (:schema existing-db) core-schema)
+       (->>
+         (d/init-db (d/datoms existing-db :eavt))
+         (d/reset-conn! existing-conn)))
+     (register-meta-subscriber! existing-conn))
+   (set! conn existing-conn))
 
 (defprotocol RuleSet
   (collect-rules [t] "Returns a collection of rules.")
