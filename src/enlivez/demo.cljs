@@ -2,180 +2,97 @@
   (:require [enlivez.core :as ez]
             [datascript.core :as d]))
 
-(ez/defhandler handler-firing-multiple-times [done]
- {:db/id item
-  [title done] :item/attrs}
- (.log js/console (pr-str "hello" item title done))
- nil)
+(let [conn @#'ez/conn] ; don't try this at home!
+  (d/reset-conn! conn
+    (d/empty-db (into (:schema @conn)
+                  {:todo/items {:db/valueType :db.type/ref
+                                :db/cardinality :db.cardinality/many}}))))
 
-(ez/deftemplate new-item []
+; when something can't be easily expressed in logic,
+; it's always possible to call a clojure function
+(defn toggle-order [order]
+  (case order
+    :ascending :descending
+    :descending :ascending))
+
+(defn render-order [order]
+  (case order
+    :ascending "ascending"
+    :descending "descending"))
+
+(ez/deftemplate items-filter [self]
+  [:label
+   [:input {:type :checkbox
+            :checked (:show-done self)
+            :on-change [[:db/add self :show-done (clojure.core/not (:show-done self))]]}]
+   "Show done?"]
+  [:button {:on-click
+            [[:db/add self :order (toggle-order (:order self))]]}
+   (render-order (:order self))])
+
+; handlers are just rules
+(ez/defrule end-edition [self item] :=
+  [[:db/add self :editing false]
+   [:db/add item :title (:draft self)]])
+
+(ez/deftemplate editable-item [item]
   :state {:db/id self
-          new-todo ""}
-  [:h1 {:on-click (handler-firing-multiple-times true)} "CLICK"]
-  [:li
-   [:form {:on-submit (do
-                        (.preventDefault %)
-                        [{:item/title new-todo :item/done false}
-                         [:db/add self ::new-todo ""]])}
-    [:input {:value new-todo
-             :on-change (doto [[:db/add self ::new-todo (-> % .-target .-value)]] prn)}]
-    [:button {:disabled (= "" new-todo)} "Add!"]]])
+          :editing false}
+  (ez/for [false (:editing self)]
+    [:span {:on-double-click
+            (and
+              (.preventDefault %event)
+              [{:db/id self :editing true :draft (:title item)}])} 
+     (:title item)])
+  (ez/for [true (:editing self)]
+    [:form {:style {:display :inline}
+            :on-submit
+            (and
+              (.preventDefault %event)
+              (end-edition self item))}
+     [:input {:value (:draft self)
+              :on-change [[:db/add self :draft (.-value (.-target %event))]]
+              :on-blur (end-edition self item)}]]))
 
-(ez/deftemplate items-filter [self show-done]
-  [:label
-   [:input {:type :checkbox
-            :checked show-done
-            :on-click [[:db/add self ::show-done (not show-done)]]}]
-   "Show done?"])
-
-(ez/deftemplate sort-btn [self show-done]
-  [:label
-   [:input {:type :checkbox
-            :checked show-done
-            :on-click [[:db/add self ::show-done (not show-done)]]}]
-   "Show done?"])
-
-(defn on-blur [self item working-title]
- [[:db/add self ::editing false]
-  [:db/add item :item/title working-title]])
+(defn sort-order [order done title]
+  [done (cond-> title (= order :descending) ez/desc)])
 
 (ez/deftemplate todo []
- :state {:db/id self
-         show-done true
-         order :ascending}
- [:div
-  (ez/fragment
-    :state {:db/id self}
-    [:h1 "Hello state"])
-  [:ul
-  (new-item)
-  [:div
-   (items-filter self show-done)
-   [:button {:on-click [[:db/add self ::order (case order
-                                                :ascending :descending
-                                                :descending :ascending)]]}
-    (case order
-      :ascending "descending"
-      :descending "ascending")]]
-  (ez/for (not (and {:db/id item
-                     [title done] :item/attrs}
-                 (or (= true show-done)
-                   (= false done))))
-    ; when nothing to display
-    (ez/for {:db/id item
-             [title done] :item/attrs}
-      ; but still some done items
-      [:li [:i "Do you want to see "
-            [:a {:href "#" :on-click (do (.preventDefault %) [[:db/add self ::show-done true]])}
-             "all you've already achieved?"]]])
-    (ez/for (not {:db/id item
-                  [title done] :item/attrs})
-      ; really nothing
-      [:li [:i "Time to write down some tasks!"]]))
-  (ez/for
-   (and {:db/id item
-         [title done] :item/attrs}
-     (or (= true show-done)
-       (= false done)))
-   #_[[item :item/title title]
-      [item :item/done done]
-      (= done show-done)]
-    :state {:db/id self
-            editing false
-            working-title ""}
-    :sort (case order
-            :descending [done (ez/desc title)]
-            [done title])
-    [:li
-     [:input {:type :checkbox :checked done
-              :on-change [[:db/add item :item/done (not done)]]}]
-     [:span
-      [:span {:on-click (when (not editing) [{:db/id self ::editing true ::working-title title}])}
-       (ez/for (= editing false) title)
-       (ez/for (= editing true)
-        [:input {:value working-title
-                 :on-change [[:db/add self ::working-title (-> % .-target .-value)]]
-                 :on-blur (on-blur self item working-title)}])]
-      [:button
-       {:on-click (doto [[:db/retractEntity item]] prn)}
-       "X"]]])]])
-
-(ez/deftemplate an-input []
   :state {:db/id self
-          value ""}
-  "X"
-  [:input {:value value :on-change [[:db/add self ::value (-> % .-target .-value)]]}])
+          :new-item ""
+          :show-done true
+          :order :ascending}
+  [:div
+   (items-filter self)
+   [:ul
+    [:li [:form {:on-submit
+                 (and (.preventDefault %event)
+                   [{:todo/_items self
+                     :title (:new-item self)
+                     :done false}
+                    [:db/add self :new-item ""]])}
+          [:input {:value (:new-item self)
+                   :on-change
+                   [[:db/add self :new-item (.-value (.-target %event))]]}]]]
+    (ez/for [item (:todo/items self)
+             :when (or (:show-done self true)
+                     (and (:show-done self false)
+                       (:done item false)))]
+      :sort (sort-order (:order self) (:done item) (:title item))
+      [:li [:input {:type :checkbox
+                    :checked (:done item)
+                    :on-change
+                    [[:db/add item :done (clojure.core/not (:done item))]]}]
+       (editable-item item)])]])
 
-#_(ez/deftemplate todo []
-   :state {:db/id self
-           a 69}
-   [:div "so far so good"
-    [:span {:on-click [[:db/add self ::a (inc a)]]} "A is " a]
-    [:div (an-input)]
-    [:div
-     [:button {:on-click [{:foo/bar (.now js/Date)}]} "Add"]
-     (ez/for [{[bar] :foo/attrs}]
-       :state {:db/id state
-               :count 0
-               foo bar}
-       [:div "created at " bar]
-       "but " foo
-       (an-input)
-       [:button 
-        {:on-click [[:db/add state ::foo (inc foo)]]}
-        "Bump"])]])
+(ez/mount #'todo (.-body js/document))
 
-(defn show []
-  (let [conn @#'ez/conn] ; don't try this at home!
-    (d/reset-conn! conn (d/empty-db (:schema @conn)))
-    (ez/mount todo (.-body js/document))
-    (:tx-data (d/transact! conn [{:item/title "something" :item/done false}
-                                 {:item/title "something else" :item/done false}]))))
-
-
-(comment
-  (datascript.core/q
-    '[:find ?self39344 ?self39325 ?value39327
-      :where [(vector) ?sk64] [?self39344 :enlivez.core/key ?sk64] [(vector / 1) ?sk65] [?self39325 :enlivez.core/key ?sk65] [?self39325 :enlivez.demo/value ?value39327]]
-    @enlivez.core/conn)
-  
-  (datascript.core/q
-    '[:find ?self39344 ?self39325 ?sk65 ?value39327
-      :where [(vector) ?sk64] [?self39344 :enlivez.core/key ?sk64] [(vector :/ 1) ?sk65] [?self39325 :enlivez.core/key ?sk65] [?self39325 :enlivez.demo/value ?value39327]]
-    @enlivez.core/conn)
-  
-  (datascript.core/q
-    '[:find ?k
-      :where [_ :enlivez.core/key ?k]]
-    @enlivez.core/conn)
-  
-  (defrule validation-error [input msg]
-    ; defrule can also extend an existing rule: it's open, so you can contribute new validators
-    ; by simply adding a defrule
-    ; (maybe an extend-rule helper that checks for existence etc. could be handy to have a split between declaration
-    ;  and extension -- like defmulti defmethod)
-    {:input/value ""
-     :db/id input
-     :input/label label
-     :validators :validators/non-empty}
-    [(str label " can't be empty." ) msg])
-  
-  (defrule form-errors
-    "Returns all error messages for a form"
-    [form msg]
-    {:db/id form
-     :form/input input}
-    (validation-error input msg))
-  
-  ; same thing in an alternate syntax
-  (defrule form-errors [form msg]
-    (validation-error (:form/input form) msg))
-  
-  ; disabling submit button:
-  :disabled (ez/for (form-errors form _) true)
-  
-  ; listing errors under a field is an ez/for
-  )
-
-
+; a trigger is notified when a match comes in existence
+; but also when it vanishes
+(ez/deftrigger console-log [true (:done item)
+                            t (:title item)]
+  :start
+  (.log js/console "new done item" t)
+  :stop
+  (.log js/console "item undone" t))
 
