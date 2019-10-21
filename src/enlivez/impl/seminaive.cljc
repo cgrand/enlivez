@@ -353,10 +353,18 @@
               call (let [f (first args)
                          args (vec (next args))
                          ret (peek args)
-                         args (pop args)]
+                         args (pop args)
+                         bound (fn [bindings x]
+                                 (if (symbol? x)
+                                   (let [x' (bindings x bindings)]
+                                     (if (identical? x' bindings)
+                                       (throw (ex-info "Insufficient bindings"
+                                                {:clause clause :var x}))
+                                       x'))
+                                   x))]
                      (keep
                        (fn [bindings]
-                         (let [r (apply (bindings f f) (map #(bindings % %) args))]
+                         (let [r (apply (bound bindings f) (map #(bound bindings %) args))]
                            (cond
                              (not (symbol? ret))
                              (when (= r ret) bindings)
