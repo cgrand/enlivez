@@ -411,7 +411,7 @@
                                  (emit-cljs [_] `(include-template (var ~name) [~@deps] ~expansion))))
                              (seq? expr)
                              (case (first expr)
-                               clojure.core/unquote (terminal env (second expr)) ; cljs escape hatch
+                               #_#_clojure.core/unquote (terminal env (second expr)) ; cljs escape hatch
                                enlivez.core/handler-call (handler-terminal env (second expr))
                                (terminal-expr env expr))
                              (symbol? expr)
@@ -473,14 +473,17 @@
     :options (s/* (s/cat :key keyword? :value any?))
     :body (s/* any?)))
 
+(defn expand-pseudo-bindings-to-q [pseudo-bindings]
+  (map
+      (fn [[lh rh]]
+        (case lh
+          :when rh
+          (list 'eq lh rh)))
+      (partition 2 pseudo-bindings)))
+
 (defn for [{&env :host-env :keys [activation known-vars]} pseudo-bindings & body]
   (when-valid [{:keys [body options]} ::fragment-body body]
-    (let [q (map
-              (fn [[lh rh]]
-                (case lh
-                  :when rh
-                  (list 'eq lh rh)))
-              (partition 2 pseudo-bindings))
+    (let [q (expand-pseudo-bindings-to-q pseudo-bindings)
           sort-expr (or (some (fn [{:keys [key value]}]
                               (when (= key :sort) value)) options) :no-sort)
           body (concat
@@ -528,11 +531,12 @@
 
 (defmacro deftrigger
   "Register side-effecting code (IO) to run for each query match."
-  [trigger-name q & body]
+  [trigger-name pseudo-bindings & body]
   (let [{:keys [start stop]} (case (first body)
                                (:start :stop) (apply hash-map body)
                                {:start (cons 'do body)})
         qname (symbol (-> *ns* ns-name name) (name trigger-name))
+        q (expand-pseudo-bindings-to-q pseudo-bindings)
         {:keys [vars bodies support-rules deps]} (analyze-q &env q)
         qhead (cons qname vars)
         rules (concat
