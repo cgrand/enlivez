@@ -6,7 +6,8 @@
     [datascript.core :as d]
     [enlivez.q :as q]
     [reagent.core :as r]
-    [enlivez.impl.seminaive :as impl]))
+    [enlivez.impl.seminaive :as impl]
+    [enlivez.impl.magic :as magic]))
 
 ; https://github.com/tonsky/datascript/wiki/Tips-&-tricks#editing-the-schema
 
@@ -278,9 +279,7 @@
         rules))))
 
 (defn handler [qname retname rules deps]
-  (let [rules (collect-all-rules (reify RuleSet
-                                   (collect-rules [t] rules)
-                                   (collect-deps [t] deps)))]
+  (let [rules' (-> rules (collect-all-rules deps) (magic/rewrite [retname qname]))]
     ; TODO : prepare rules
     (fn [args]
       (fn [e]
@@ -288,31 +287,32 @@
           (let [tx-data (into []
                           (comp cat cat)
                           (get (impl/eval-rules
-                                 (assoc (impl/make-db @conn) qname
-                                   #{(list* e this args)}) rules)
+                                 (assoc (impl/make-db @conn)
+                                   qname #{(list* e this args)})
+                                 rules)
                             retname))]
             (d/transact! conn tx-data)))))))
 
-(defn dryrun-handler
-  "Runs the specified handler and returns its tx-data."
-  [h & args]
-  (let [[qname & expected-args] (first (::handler (::defhandler h)))
-        rules (collect-all-rules h)
-        call `call#
-        activation `activation#
-        call-rule `((~call ret#) (~activation ~@expected-args) (~qname ~@args ret#))
-        rules (conj rules call-rule)]
-    (when-not (= (count args) (count expected-args))
-    (throw (ex-info (str "Not enough arguments passed to handler, expecting "
-                      (count expected-args) " got " (count args))
-             {:args args
-              :expected-args expected-args})))
-    (into []
-     (comp cat cat)
-     (get (impl/eval-rules
-            (assoc (impl/make-db @conn) activation
-              #{args}) rules)
-       call))))
+#_(defn dryrun-handler
+   "Runs the specified handler and returns its tx-data."
+   [h & args]
+   (let [[qname & expected-args] (first (::handler (::defhandler h)))
+         rules (collect-all-rules h)
+         call `call#
+         activation `activation#
+         call-rule `((~call ret#) (~activation ~@expected-args) (~qname ~@args ret#))
+         rules (conj rules call-rule)]
+     (when-not (= (count args) (count expected-args))
+     (throw (ex-info (str "Not enough arguments passed to handler, expecting "
+                       (count expected-args) " got " (count args))
+              {:args args
+               :expected-args expected-args})))
+     (into []
+      (comp cat cat)
+      (get (impl/eval-rules
+             (assoc (impl/make-db @conn) activation
+               #{args}) rules)
+        call))))
 
 (def trigger-component
   (reify Component

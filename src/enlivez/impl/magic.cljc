@@ -69,7 +69,7 @@
                               [prev-clauses []] clauses)]
     (cons (cons head clauses) new-rules)))
 
-(defn magic-rewrite
+(defn rewrite
   "Rewrites rules while preserving the computation of goals.
    rules is a collection of canonical rules.
    goals is a collection of rule names."

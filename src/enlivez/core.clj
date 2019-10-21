@@ -218,23 +218,6 @@
                 (list 'and exprs)
                 (first exprs)) var)))
 
-(defmacro defhandler
-  "Defines a function suitable to be called in a handler expression.
-   This functions takes a query after the arguments vector (no var-args, no destructuring atm).
-   The body of the function will be evaluated for each match of the query.
-   Arguments are bound in the query.
-   All query vars are bound in the body."
-  [handler-name args rel-expr]
-  (let [qname (symbol (-> *ns* ns-name name) (name handler-name))
-        [_eq q ret] (expand-relational-expression rel-expr)
-        {:keys [deps expansion]} (analyze-case &env qname (conj args ret) [q])]
-    `(def ~(vary-meta handler-name assoc ::handler true
-             :arglists `'~(list args) ::rule true)
-       {::defhandler
-        {::handler '((~qname ~@args) ~rel-expr)
-         ::expansion ~expansion
-         ::deps [~@(map (fn [x] `(var ~x)) deps)]}})))
-
 ; should move to cljc
 (defn collect-case-ruleset [{::keys [expansion deps] :as rule-value}]
   (loop [rule-set (set expansion) done #{} todo deps]
