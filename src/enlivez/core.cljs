@@ -279,7 +279,7 @@
         rules))))
 
 (defn handler [qname retname rules deps]
-  (let [rules' (-> rules (collect-all-rules deps) (magic/rewrite [retname qname]))]
+  (let [rules (-> rules (collect-all-rules deps) (magic/rewrite [retname qname]))]
     ; TODO : prepare rules
     (fn [args]
       (fn [e]
