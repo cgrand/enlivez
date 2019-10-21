@@ -50,6 +50,7 @@
             (interop? sym))
         sym
         (let [env {:host-env &env :known-vars #{}}
+              sym (if (= "." (namespace sym)) (symbol (name sym)) sym)
               {:keys [name meta]} (resolve-var env sym :throw)]
           (if (::rule meta)
             name
@@ -58,13 +59,14 @@
       (if (or (and (seq? sym) (= 'var (first sym))) (impl/special? sym) (impl/special-pred? sym)
             (interop? sym))
         sym
-        (if-some [v (ns-resolve *ns* &env sym)]
-          (let [m (meta v)
-                name (symbol (-> m :ns ns-name name) (-> m :name name))]
-            (if (::rule m)
-              name
-              (list 'var name)))
-         (throw (ex-info (str "Unable to resolve symbol: " sym) {:sym sym :ns *ns*})))))))
+        (let [sym (if (= "." (namespace sym)) (symbol (name sym)) sym)]
+          (if-some [v (ns-resolve *ns* &env sym)]
+            (let [m (meta v)
+                  name (symbol (-> m :ns ns-name name) (-> m :name name))]
+              (if (::rule m)
+                name
+                (list 'var name)))
+          (throw (ex-info (str "Unable to resolve symbol: " sym) {:sym sym :ns *ns*}))))))))
 
 (s/def ::defrule
   (s/cat :name simple-symbol? :doc (s/? string?)

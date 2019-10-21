@@ -24,7 +24,7 @@
   [:label
    [:input {:type :checkbox
             :checked (:show-done self)
-            :on-change [[:db/add self :show-done (clojure.core/not (:show-done self))]]}]
+            :on-change [[:db/add self :show-done (./not (:show-done self))]]}]
    "Show done?"]
   [:button {:on-click
             [[:db/add self :order (toggle-order (:order self))]]}
@@ -82,7 +82,7 @@
       [:li [:input {:type :checkbox
                     :checked (:done item)
                     :on-change
-                    [[:db/add item :done (clojure.core/not (:done item))]]}]
+                    [[:db/add item :done (./not (:done item))]]}]
        (editable-item item)])]])
 
 (ez/mount #'todo (.-body js/document))
