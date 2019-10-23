@@ -293,26 +293,24 @@
                             retname))]
             (d/transact! conn tx-data)))))))
 
-#_(defn dryrun-handler
-   "Runs the specified handler and returns its tx-data."
-   [h & args]
-   (let [[qname & expected-args] (first (::handler (::defhandler h)))
-         rules (collect-all-rules h)
-         call `call#
-         activation `activation#
-         call-rule `((~call ret#) (~activation ~@expected-args) (~qname ~@args ret#))
-         rules (conj rules call-rule)]
-     (when-not (= (count args) (count expected-args))
-     (throw (ex-info (str "Not enough arguments passed to handler, expecting "
-                       (count expected-args) " got " (count args))
-              {:args args
-               :expected-args expected-args})))
-     (into []
-      (comp cat cat)
-      (get (impl/eval-rules
-             (assoc (impl/make-db @conn) activation
-               #{args}) rules)
-        call))))
+(defn handler-fn*
+  [rule-var]
+  (let [qname (::rule-name (meta rule-var))
+        rule `((q# tx#) (activation# this# e#) (~qname this# e# tx#))
+        [q activation] (map first rule)
+        rules (-> (cons rule (collect-all-rules @rule-var))
+                (magic/rewrite [activation q]))]
+    (doseq [rule rules] (prn rule))
+    (fn [e]
+      (this-as this
+        (let [tx-data (into []
+                        (comp cat cat)
+                        (get (impl/eval-rules
+                               (assoc (impl/make-db @conn)
+                                 activation #{(list this e)})
+                               rules)
+                          q))]
+          (d/transact! conn tx-data))))))
 
 (def trigger-component
   (reify Component

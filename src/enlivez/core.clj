@@ -554,3 +554,8 @@
                 support-rules)]
     `(io-trigger* ~(keyword qname) [~@rules] [~@(map (fn [x] `(var ~x)) deps)])))
 
+(defmacro handler-fn
+  "Takes a rule and returns a function to be used as an event handler.
+   The rule must have three attributes: this, event and returned tx-data."
+  [rulename]
+  `(handler-fn* (var ~rulename)))
